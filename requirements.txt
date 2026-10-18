@@ -1,0 +1,18 @@
+# ==============================================================================
+# Research_V2: Multi-UAV Deep Reinforcement Learning Framework Dependencies
+# Compatible with Python 3.9+ (tested through Python 3.14)
+# ==============================================================================
+
+# Core Deep Reinforcement Learning
+torch>=2.0.0
+
+# Scientific Computing & Environment
+numpy>=1.24.0
+pandas>=2.0.0
+gymnasium>=0.29.0
+
+# Publication-Grade Visualization & Plotting (2D & 3D)
+matplotlib>=3.7.0
+
+# Automated Verification & Contract Test Suite
+pytest>=7.0.0
