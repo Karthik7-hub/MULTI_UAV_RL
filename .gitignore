@@ -1,0 +1,44 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Caches and testing
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments (Do NOT add 'env' because research_v2/env is our RL simulation environment)
+.venv/
+venv/
+virtualenv/
+
+# Experimental results, checkpoints, and logs (ignored for now as requested)
+results/
+*.pt
+*.pth
+*.ckpt
+*.log
+
+# IDE and OS files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Temporary and scratch files
+*.tmp
+*.bak
+scratch/
+*.excalidraw
+
+# Documentation (ignored for now as requested)
+docs/
+
