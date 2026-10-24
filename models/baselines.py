@@ -105,12 +105,34 @@ class LowestLatencyPolicy(BaseOffloadingHeuristic):
 
 class EnergyDeadlineAwareGreedyPolicy(BaseOffloadingHeuristic):
     """
-    Principled multi-objective classical offloading heuristic.
-    Considers:
-    - Feasible deadline satisfaction (t_delay <= task.deadline)
-    - Transmission + computation delay
-    - Energy consumption (battery conservation)
-    Cost J = Delay + 0.005 * Energy + (10.0 if Deadline Missed else 0.0)
+    # =========================================================================
+    # PURPOSE:
+    # Principled multi-objective classical offloading heuristic.
+    # Evaluates each possible offloading candidate k in {0=Local, 1..N-1=Peers, N=Edge}
+    # and selects the destination that minimizes a composite multi-objective cost J(k).
+    #
+    # MATHEMATICAL FORMULATION:
+    # J(k) = T_total(k) + w_E * E(k) + lambda_penalty * I( T_total(k) > T_max )
+    #
+    # 1. Candidate Latencies & Energies:
+    #    - Local Node (k=0):
+    #        T_local = C / f_local [seconds]
+    #        E_local = kappa * (f_local)^2 * C [Joules]
+    #    - Peer UAVs (k in 1..N-1):
+    #        T_peer = (D / R_peer(d_p)) + (C / f_peer) [seconds]
+    #        E_peer = P_tx * (D / R_peer(d_p)) [Joules]
+    #    - Ground Edge Server (k=N):
+    #        T_edge = (D / R_edge(d_e)) + (C / f_edge) [seconds]
+    #        E_edge = P_tx * (D / R_edge(d_e)) [Joules]
+    #
+    # 2. Penalty for Deadline Violation:
+    #    I(condition) = 1.0 if T_total > T_max, else 0.0.
+    #    If the task cannot finish before deadline T_max, a heavy penalty (10.0) is added.
+    #
+    # 3. Parameters:
+    #    - weight_energy (w_E) = 0.005: Trade-off factor converting Joules to seconds-equivalent.
+    #    - deadline_penalty (lambda_penalty) = 10.0: Penalty for missing latency deadline.
+    # =========================================================================
     """
     def __init__(self, weight_energy: float = 0.005, deadline_penalty: float = 10.0):
         self.weight_energy = weight_energy

@@ -173,10 +173,25 @@ class CPPOAgent:
         # - Centralized Training & Centralized Execution (CTCE):
         #   A single monolithic actor receives the entire global state s (dimension 40)
         #   and directly outputs actions for ALL N=4 UAVs at the same time.
-        # - Advantage: Full global information awareness; no coordination mismatch.
+        # - Advantage: Full global information awareness; zero coordination mismatch.
         # - Limitation: Unrealistic for real-world swarms where individual UAVs cannot maintain
-        #   instantaneous high-bandwidth communication links to a central ground station.
+        #   instantaneous zero-latency communication links to a central ground station.
         #   Serves as an empirical performance upper-bound benchmark for MAPPO.
+        #
+        # MATHEMATICAL FORMULATION:
+        # 1. Joint Policy Factorization:
+        #    pi_theta(a | s) = prod_{j=1}^N pi_theta^{move}(a_{j,move} | s) * pi_theta^{offload}(a_{j,offload} | s)
+        #    log pi_theta(a | s) = sum_{j=1}^N [ log pi_theta^{move} + log pi_theta^{offload} ]
+        #
+        # 2. Probability Ratio:
+        #    r(theta) = exp( log pi_theta(a | s) - log pi_{theta_old}(a | s) )
+        #
+        # 3. Clipped Surrogate Joint Actor Objective:
+        #    L^{CLIP}(theta) = - E [ min( r(theta) hat{A}, clip(r(theta), 1 - eps, 1 + eps) hat{A} ) ]
+        #                      - c_ent * H(pi_theta)
+        #
+        # 4. Centralized Value Function Loss:
+        #    L^V(phi) = E [ ( V_phi(s) - R_target )^2 ]
         # =========================================================================
         """
         t_states = torch.tensor(states, dtype=torch.float32, device=self.device)

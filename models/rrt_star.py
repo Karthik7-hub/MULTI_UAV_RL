@@ -185,7 +185,19 @@ class RRTStar3DPlanner:
         return path, planning_time
 
 class RRTStarBaseline:
-    """RRT* Path Following Policy with greedy MEC offloading for MultiUAVEnv."""
+    """
+    # =========================================================================
+    # PURPOSE:
+    # Autonomous 3D RRT* Trajectory Following & MEC Offloading Baseline.
+    # Combines asymptotic optimal random-sampling path planning with rule-based
+    # edge computing offloading policies.
+    #
+    # EXECUTION PIPELINE:
+    # 1. On first step / reset: Plans 3D RRT* waypoint sequence to station.
+    # 2. At each timestep: Steers UAV toward active waypoint along the tree branch.
+    # 3. Task Offloading: Dispatches task to designated heuristic (e.g., energy-deadline aware).
+    # =========================================================================
+    """
     def __init__(self, env, offload_policy=None):
         self.env = env
         self.planner = RRTStar3DPlanner(

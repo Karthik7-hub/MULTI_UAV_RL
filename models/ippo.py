@@ -124,6 +124,22 @@ class IPPOAgent:
         # - In IPPO, the Critic V_phi(o_j) evaluates ONLY the local observation o_j.
         # - Because peer UAVs are concurrently updating their policies, the environment appears
         #   non-stationary to each individual UAV's critic, representing the standard DTDE baseline.
+        #
+        # MATHEMATICAL FORMULATION:
+        # 1. Local Critic Estimation:
+        #    hat{V}_j = V_phi(o_j)
+        #    delta_{t,j}^V = r_t + gamma * V_phi(o_{t+1,j}) * (1 - d_t) - V_phi(o_{t,j})
+        #
+        # 2. Local Advantage Computation (GAE):
+        #    hat{A}_{t,j} = sum_{l=0}^inf (gamma * lambda)^l delta_{t+l,j}^V
+        #
+        # 3. Decentralized Clipped Actor Loss:
+        #    L_j^{CLIP}(theta) = - E [ min( r_{t,j}(theta) hat{A}_{t,j},
+        #                                  clip(r_{t,j}(theta), 1 - eps, 1 + eps) hat{A}_{t,j} ) ]
+        #                        - c_ent * H(pi_theta( . | o_j ))
+        #
+        # 4. Local Critic Regression Loss:
+        #    L^{V_local}(phi) = E [ ( V_phi(o_j) - R_{t,j} )^2 ]
         # =========================================================================
         """
         # Calculate advantages using mean local value estimates

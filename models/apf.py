@@ -131,7 +131,15 @@ class SAPFNavigator:
         return f_net, min_clearance
 
 class SAPFBaseline:
-    """Sequential Adaptive Potential Field Baseline with greedy MEC offloading."""
+    """
+    # =========================================================================
+    # PURPOSE:
+    # Sequential Adaptive Potential Field (SAPF) Multi-UAV Navigation Baseline.
+    # Evaluates artificial attractive, repulsive, and circulation potential forces
+    # at every discrete simulation timestep to compute real-time flight vectors,
+    # paired with classical greedy MEC task offloading.
+    # =========================================================================
+    """
     def __init__(self, env, offload_policy=None):
         self.env = env
         self.navigator = SAPFNavigator(

@@ -474,6 +474,15 @@ class PurePursuit3DController:
         return next_pos, v_cmd, self.active_wp_idx, status
 
 class AStarBaseline:
+    """
+    # =========================================================================
+    # PURPOSE:
+    # Deterministic 3D A* Path Planner paired with lowest-latency MEC offloading.
+    # Evaluates collision-free discrete waypoint navigation around 3D obstacles
+    # while greedily selecting the computation node (Local vs Peer vs Edge)
+    # with the lowest estimated transmission + processing delay.
+    # =========================================================================
+    """
     def __init__(self, env):
         self.env = env
         self.planner = AStar3DPlanner(
@@ -564,11 +573,33 @@ class AStarBaseline:
 
 class HybridAStarMAPPONavigator:
     """
-    Hierarchical Hybrid Planner:
-    - High-level: 3D A* graph search computes globally collision-free waypoint roadmap.
-    - Low-level: 3D Pure Pursuit Controller tracks waypoints.
-    - Offloading & Multi-agent: MAPPO neural policy evaluates optimal discrete MEC offloading decisions
-      and applies reactive collision-avoiding control.
+    # =========================================================================
+    # PURPOSE:
+    # Hierarchical Hybrid Multi-UAV Navigation and Mobile Edge Computing Architecture.
+    # Combines deterministic global geometric search with reactive multi-agent
+    # reinforcement learning for joint trajectory execution and task offloading.
+    #
+    # HIERARCHICAL COUPLING ARCHITECTURE:
+    # 1. High-Level Macro Planner (3D A* Search):
+    #    - Evaluates 3D grid graph with 26-connected spatial neighbor transitions.
+    #    - Priority f(n) = g(n) + h(n), where h(n) = ||p_n - p_goal||_2.
+    #    - Guarantees zero obstacle penetration against complex 3D cylinder/sphere
+    #      geometries by building a collision-free polyline waypoint corridor:
+    #      W_j = [w_0, w_1, ..., w_K].
+    #
+    # 2. Mid-Level Path Tracking Controller (3D Pure Pursuit):
+    #    - Searches forward along the A* corridor W_j for a lookahead target point
+    #      p_target at distance L = lookahead_dist (default: 12.0 m).
+    #    - Computes commanded velocity vector:
+    #      v_cmd = v_max * (p_target - p_curr) / ||p_target - p_curr||_2
+    #    - Enforces terminal deceleration within decel_dist (15.0 m) of goal.
+    #
+    # 3. Low-Level Decentralized RL Execution (MAPPO Actor):
+    #    - Evaluates local observation o_j and samples optimal discrete offloading
+    #      decision a_off in {0=Local, 1..N-1=Peer UAV, N=Ground Edge Server}.
+    #    - When coupled with velocity refinement, balances global corridor adherence
+    #      with dynamic inter-UAV separation and local avoidance.
+    # =========================================================================
     """
     def __init__(self, env: Any, mappo_agent: Optional[Any] = None, lookahead: float = 12.0):
         self.env = env
