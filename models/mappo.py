@@ -183,8 +183,30 @@ class RolloutBuffer:
 
     def compute_gae(self, last_val: float, last_terminated: bool = False, gamma: float = 0.99, gae_lambda: float = 0.95):
         """
-        Calculates Generalized Advantage Estimation (GAE) and TD(lambda) Returns with proper
-        Gymnasium boundary handling: bootstraps on truncation, stops on genuine termination.
+        # =========================================================================
+        # MATHEMATICAL DERIVATION: GENERALIZED ADVANTAGE ESTIMATION (GAE)
+        # =========================================================================
+        # 1. Temporal Difference (TD) Residual at step t:
+        #    delta_t^V = r_t + gamma * V(s_{t+1}) * (1 - d_t) - V(s_t)
+        #    where:
+        #    - r_t: Team scalar reward obtained at step t.
+        #    - gamma in [0, 1]: Future return discount factor (default: 0.99).
+        #    - V(s_{t+1}): Centralized Critic value estimate for the next global state.
+        #    - d_t: 1.0 if episode genuinely terminated (arrival or collision), 0.0 otherwise.
+        #           NOTE: If an episode reaches episode_length without terminal failure
+        #           (truncated), d_t=0 and we bootstrap with last_val to avoid truncation bias.
+        #    - V(s_t): Value predicted by Centralized Critic at current global state s_t.
+        #
+        # 2. Generalized Advantage Estimator A_t^{GAE(gamma, lambda)}:
+        #    A_t = delta_t^V + (gamma * lambda) * (1 - d_t) * A_{t+1}
+        #    where lambda in [0, 1] balances variance vs bias:
+        #    - lambda = 0: A_t = delta_t^V (lowest variance, highest TD bias)
+        #    - lambda = 1: A_t = sum_{l=0}^inf gamma^l r_{t+l} - V(s_t) (unbiased Monte Carlo, high variance)
+        #    - lambda = 0.95: Schulman et al. optimal trade-off parameter.
+        #
+        # 3. Target Returns for Critic MSE Training:
+        #    R_t = A_t + V(s_t)  (equivalent to empirical lambda-return)
+        # =========================================================================
         """
         advantages = np.zeros(self.num_steps, dtype=np.float32)
         last_gae = 0.0
@@ -287,7 +309,31 @@ class MAPPOAgent:
         gae_lambda: float = 0.95
     ):
         """
-        Executes mini-batch PPO policy and value network updates on collected rollout buffer.
+        # =========================================================================
+        # MATHEMATICAL DERIVATION: PPO CLIPPED SURROGATE POLICY & VALUE UPDATES
+        # =========================================================================
+        # 1. Advantage Normalization:
+        #    hat{A}_t = (A_t - mu_A) / (sigma_A + 1e-8)
+        #    Ensures balanced gradients regardless of reward scaling across curriculum stages.
+        #
+        # 2. Probability Ratio r_t(theta):
+        #    r_t(theta) = pi_theta(a_t | o_t) / pi_{theta_old}(a_t | o_t)
+        #               = exp( log pi_theta(a_t | o_t) - log pi_{theta_old}(a_t | o_t) )
+        #    Measures how much more or less likely the updated policy would choose action a_t.
+        #
+        # 3. Clipped Surrogate Actor Loss L^{CLIP}(theta):
+        #    L^{CLIP}(theta) = - E_t [ min( r_t(theta) hat{A}_t,
+        #                                  clip(r_t(theta), 1 - eps, 1 + eps) hat{A}_t ) ]
+        #                      - c_ent * H(pi_theta( . | o_t))
+        #    where:
+        #    - eps = 0.2: PPO trust-region clipping threshold.
+        #    - H: Shannon action entropy to incentivize exploratory behavior.
+        #    - c_ent = 0.01: Entropy coefficient.
+        #
+        # 4. Centralized Critic MSE Loss L^V(phi):
+        #    L^V(phi) = E_{t, s_t} [ ( V_phi(s_t) - R_t )^2 ]
+        #    Trained via Adam regression to match target returns R_t across global states.
+        # =========================================================================
         """
         if next_state is not None:
             last_val = self.get_value(next_state)

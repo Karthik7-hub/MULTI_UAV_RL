@@ -54,6 +54,22 @@ ENV_PRESETS = {
 
 @dataclass
 class AirspaceConfig:
+    """
+    3D Airspace Boundaries and Obstacle Geometry.
+    
+    Coordinate System:
+        Cartesian 3D Euclidean frame: Workspace W = [x_min, x_max] x [y_min, y_max] x [z_min, z_max]
+        - Origin (0, 0, 0): Ground level at the south-west corner of the airspace.
+        - X-axis: East-West horizontal coordinate [meters (m)].
+        - Y-axis: North-South horizontal coordinate [meters (m)].
+        - Z-axis: Vertical flight altitude [meters (m)].
+        
+    Obstacle Representation:
+        Cylindrical buildings defined by 4-tuples: (cx, cy, radius, height)
+        - cx, cy: Horizontal centerline coordinates in XY plane [m]
+        - radius: Physical cylindrical radius [m]
+        - height: Top elevation of the obstacle [m]
+    """
     preset_name: str = "benchmark"
     x_min: float = 0.0
     x_max: float = 200.0
@@ -62,20 +78,45 @@ class AirspaceConfig:
     z_min: float = 0.0
     z_max: float = 100.0
     
-    # Obstacle cylinders: (center_x, center_y, radius, height)
+    # Obstacle cylinders: (center_x, center_y, radius, height) in meters
     obstacles: List[Tuple[float, float, float, float]] = field(default_factory=lambda: [
-        (142.5, 100.0, 10.0, 80.0),  # East corridor
-        (100.0, 142.5, 10.0, 85.0),  # North corridor
-        (57.5, 100.0, 10.0, 80.0),   # West corridor
-        (100.0, 57.5, 10.0, 75.0),   # South corridor
+        (142.5, 100.0, 10.0, 80.0),  # East corridor building
+        (100.0, 142.5, 10.0, 85.0),  # North corridor building
+        (57.5, 100.0, 10.0, 80.0),   # West corridor building
+        (100.0, 57.5, 10.0, 75.0),   # South corridor building
     ])
     
-    # Mission center & Ground Edge Server location
+    # Mission center & Ground Edge Server location (X, Y, Z in meters)
     mission_center: Tuple[float, float, float] = (100.0, 100.0, 50.0)
     edge_server_pos: Tuple[float, float, float] = (100.0, 100.0, 0.0)
 
 @dataclass
 class UAVPhysicsConfig:
+    """
+    Physical UAV Kinematics, Safety Thresholds, and Aerodynamic Power Constants.
+    
+    Kinematics:
+        - delta_t: Discrete simulation step duration [seconds (s)].
+        - v_max: Physical maximum forward flight speed [m/s].
+        - mass: UAV total mass [kg].
+        
+    Safety and Navigation Thresholds:
+        - d_safe: Minimum inter-UAV separation distance to prevent mid-air collisions [m].
+        - obstacle_margin: Clearance buffer added to obstacle radius [m].
+        - reach_tolerance: Distance threshold within which a UAV is considered to have arrived [m].
+        - deadband_radius: Station-holding tolerance where velocity is zeroed to prevent jitter [m].
+        
+    Rotary-Wing Aerodynamics (Zeng et al., IEEE TWC 2019):
+        P(v) = P_0 * (1 + 3*v^2 / U_tip^2) + P_i * sqrt(sqrt(1 + v^4/(4*v_0^4)) - v^2/(2*v_0^2)) + 0.5 * d_0 * rho * s * A * v^3
+        - P_0: Blade profile power in hover [Watts (W)].
+        - P_i: Induced power in hover [Watts (W)].
+        - U_tip: Linear rotor blade tip speed [m/s].
+        - v_0: Mean rotor induced velocity during hover [m/s].
+        - d_0: Fuselage aerodynamic drag coefficient [dimensionless].
+        - rho: Ambient air density at sea level [kg/m^3].
+        - s: Rotor solidity ratio (blade area / disc area) [dimensionless].
+        - A: Total rotor disc surface area [m^2].
+    """
     num_uavs: int = 4
     delta_t: float = 1.0           # Time step (seconds)
     v_max: float = 15.0            # Maximum flight velocity (m/s)
@@ -103,6 +144,22 @@ class UAVPhysicsConfig:
 
 @dataclass
 class CommunicationConfig:
+    """
+    Wireless Radio Frequency (RF) Communication Channel Parameters.
+    
+    Channel Model:
+        Free-space path loss channel gain: h(d) = beta_0 / d^2
+        Shannon Channel Capacity with OFDMA subchannel sharing:
+            R = (B / K_tx) * log2(1 + SNR)
+            SNR = (P_tx * h(d)) / sigma^2
+            
+    Parameters:
+        - bandwidth (B): Total RF channel bandwidth = 20 MHz (20e6 Hz).
+        - carrier_freq: RF center frequency = 2.4 GHz (2.4e9 Hz).
+        - tx_power (P_tx): UAV transmit power = 100 mW (0.1 Watts).
+        - noise_power_dbm: Thermal noise power spectral density = -100 dBm (1e-13 Watts).
+        - beta_0_db: Channel power gain at 1m reference distance = -50 dB (1e-5).
+    """
     bandwidth: float = 20e6        # RF Bandwidth (20 MHz)
     carrier_freq: float = 2.4e9    # Carrier Frequency (2.4 GHz)
     tx_power: float = 0.1          # UAV RF Transmit power (100 mW)
@@ -111,6 +168,22 @@ class CommunicationConfig:
 
 @dataclass
 class ComputationConfig:
+    """
+    Mobile Edge Computing (MEC) Server and On-Board CPU Parameters.
+    
+    Energy Model (Dynamic Voltage and Frequency Scaling - DVFS):
+        E_comp = kappa * f^2 * C
+        - kappa: Effective switched capacitance of the processor chip [J / (cycle * Hz^2)].
+        - f: Processor clock frequency [Hz = cycles/second].
+        - C: Required computation cycles [cycles].
+        
+    Parameters:
+        - f_local: Local UAV on-board processor clock frequency = 1.5 GHz.
+        - f_peer: Neighbor UAV processor clock frequency = 1.5 GHz.
+        - f_edge: Ground Edge Server total processor clock frequency = 20.0 GHz.
+        - kappa: Switched capacitance constant = 1e-28 J/(cycle*Hz^2).
+        - edge_background_load: Number of background cellular tasks sharing Edge CPU.
+    """
     f_local: float = 1.5e9         # Local UAV CPU frequency (1.5 GHz)
     f_peer: float = 1.5e9          # Peer UAV CPU frequency (1.5 GHz)
     f_edge: float = 20.0e9         # Ground Edge Server CPU frequency (20 GHz)
@@ -119,6 +192,16 @@ class ComputationConfig:
 
 @dataclass
 class TaskConfig:
+    """
+    Stochastic Computational Task Generation Parameters.
+    
+    Generation Model:
+        Task arrival follows a Poisson process with parameter lambda (tasks/second).
+        When a task arrives, its attributes are uniformly sampled within ranges:
+        - CPU Cycles: C ~ Uniform(cycles_min, cycles_max) [cycles]
+        - Data Size: D ~ Uniform(data_size_min, data_size_max) [bits]
+        - Latency Deadline: T_max ~ Uniform(deadline_min, deadline_max) [seconds]
+    """
     poisson_lambda: float = 0.8    # Average task arrival rate per UAV (tasks/sec)
     cycles_min: float = 0.5e9      # Min CPU cycles (0.5 Gcycles)
     cycles_max: float = 1.5e9      # Max CPU cycles (1.5 Gcycles)
@@ -129,6 +212,21 @@ class TaskConfig:
 
 @dataclass
 class MAPPOConfig:
+    """
+    Multi-Agent Proximal Policy Optimization (MAPPO) Hyperparameters.
+    
+    Algorithms:
+        - gamma: Temporal reward discount factor (0.99).
+        - gae_lambda: Generalized Advantage Estimation (GAE) exponential decay parameter (0.95).
+        - clip_epsilon: PPO probability ratio clipping parameter (0.2).
+        - entropy_coef: Entropy regularization coefficient to encourage exploration (0.01).
+        - value_loss_coef: Critic value function MSE loss coefficient (0.5).
+        - max_grad_norm: Maximum gradient norm for gradient clipping (0.5).
+        - ppo_epochs: Number of gradient updates per rollout (5).
+        - batch_size: Mini-batch size for SGD/Adam updates (64).
+        - num_episodes: Total training episodes (150-250).
+        - episode_length: Simulation steps per episode (100).
+    """
     hidden_dim: int = 128
     actor_lr: float = 3e-4
     critic_lr: float = 1e-3
@@ -145,6 +243,7 @@ class MAPPOConfig:
 
 @dataclass
 class MasterConfig:
+    """Consolidated master configuration containing all sub-system configurations."""
     airspace: AirspaceConfig = field(default_factory=AirspaceConfig)
     physics: UAVPhysicsConfig = field(default_factory=UAVPhysicsConfig)
     comm: CommunicationConfig = field(default_factory=CommunicationConfig)
@@ -153,11 +252,21 @@ class MasterConfig:
     mappo: MAPPOConfig = field(default_factory=MAPPOConfig)
 
 def get_preset_config(preset: str = "benchmark", num_uavs: int = 4) -> MasterConfig:
-    """Instantiates MasterConfig configured with a designated environment preset and fleet size."""
+    """
+    Instantiates MasterConfig configured with a designated environment preset and fleet size.
+    
+    Args:
+        preset: Name of preset scenario ('benchmark', 'metropolis', 'chokepoint', 'canyon').
+        num_uavs: Number of autonomous UAVs in the fleet (default: 4).
+        
+    Returns:
+        MasterConfig instance initialized with preset obstacles and fleet parameters.
+    """
     cfg = MasterConfig()
     cfg.physics.num_uavs = num_uavs
     cfg.airspace.preset_name = preset
     if preset in ENV_PRESETS:
         cfg.airspace.obstacles = list(ENV_PRESETS[preset])
     return cfg
+
 

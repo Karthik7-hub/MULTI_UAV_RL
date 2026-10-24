@@ -40,6 +40,3 @@ desktop.ini
 scratch/
 *.excalidraw
 
-# Documentation (ignored for now as requested)
-docs/
-
