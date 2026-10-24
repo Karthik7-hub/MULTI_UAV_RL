@@ -601,10 +601,19 @@ class HybridAStarMAPPONavigator:
     #      with dynamic inter-UAV separation and local avoidance.
     # =========================================================================
     """
-    def __init__(self, env: Any, mappo_agent: Optional[Any] = None, lookahead: float = 12.0):
+    def __init__(
+        self,
+        env: Any,
+        mappo_agent: Optional[Any] = None,
+        lookahead: float = 12.0,
+        residual_weight: float = 0.0,
+        apply_terminal_damping: bool = True
+    ):
         self.env = env
         self.mappo_agent = mappo_agent
         self.lookahead = lookahead
+        self.residual_weight = residual_weight
+        self.apply_terminal_damping = apply_terminal_damping
         self.controllers = {}
         self.raw_obs = env.cfg.airspace.obstacles
         self.margin = env.cfg.physics.obstacle_margin
@@ -638,26 +647,49 @@ class HybridAStarMAPPONavigator:
 
     def select_actions(self, obs: Dict[int, np.ndarray]) -> Dict[int, Dict[str, Any]]:
         actions = {}
+        dt = self.env.cfg.physics.delta_t
+        v_max = self.env.cfg.physics.v_max
+        reach_tol = self.env.cfg.physics.reach_tolerance
+
         for j in range(self.env.num_uavs):
             curr_pos = self.env.positions[j]
-            next_pos, cmd_vel, wp_idx, status = self.controllers[j].step(curr_pos, dt=self.env.cfg.physics.delta_t)
+            next_pos, cmd_vel, wp_idx, status = self.controllers[j].step(curr_pos, dt=dt)
             
-            # Continuous movement displacement
-            move_disp = cmd_vel * self.env.cfg.physics.delta_t
+            # Default nominal velocity from Pure Pursuit waypoint corridor tracker
+            final_vel = cmd_vel.copy()
+            offload_choice = self.env.num_uavs
             
-            # Neural offloading decision (if mappo_agent available), else greedy
-            offload_choice = 0
             if self.mappo_agent is not None:
                 import torch
                 t_obs = torch.tensor(obs[j], dtype=torch.float32, device=self.mappo_agent.device).unsqueeze(0)
                 with torch.no_grad():
-                    _, act_off, _ = self.mappo_agent.actor.sample_action(t_obs, deterministic=True)
+                    act_move, act_off, _ = self.mappo_agent.actor.sample_action(t_obs, deterministic=True)
                 offload_choice = int(act_off.squeeze(0).cpu().item())
-            else:
-                offload_choice = self.env.num_uavs
                 
+                # Causal RL Residual Navigation Coupling:
+                # If residual_weight > 0.0, blend the learned continuous RL action into the nominal Pure Pursuit command
+                if self.residual_weight > 0.0:
+                    rl_vel = act_move.squeeze(0).cpu().numpy().astype(np.float32)
+                    dist_to_goal = float(np.linalg.norm(self.env.stations[j] - curr_pos))
+                    
+                    if self.apply_terminal_damping:
+                        # Smoothly damp out residual perturbations within goal acceptance radius
+                        damping = float(np.clip((dist_to_goal - reach_tol * 0.7) / (reach_tol * 1.5), 0.0, 1.0))
+                    else:
+                        damping = 1.0
+                        
+                    combined_vel = cmd_vel + self.residual_weight * damping * rl_vel
+                    speed = float(np.linalg.norm(combined_vel))
+                    if speed > v_max:
+                        final_vel = (combined_vel / speed) * v_max
+                    else:
+                        final_vel = combined_vel
+
+            # Continuous movement displacement
+            move_disp = final_vel * dt
+            
             actions[j] = {
-                "move": np.clip(move_disp, -self.env.cfg.physics.v_max, self.env.cfg.physics.v_max),
+                "move": np.clip(move_disp, -v_max, v_max).astype(np.float32),
                 "offload": offload_choice
             }
         return actions

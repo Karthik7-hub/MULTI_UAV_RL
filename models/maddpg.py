@@ -293,9 +293,22 @@ class MADDPGAgent:
 
     def save_checkpoint(self, path: str):
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        torch.save({"actor": self.actor.state_dict(), "critic": self.critic.state_dict()}, path)
+        torch.save({
+            "actor": self.actor.state_dict(),
+            "critic": self.critic.state_dict(),
+            "actor_opt": self.actor_opt.state_dict(),
+            "critic_opt": self.critic_opt.state_dict(),
+            "policy_variant": self.policy_variant,
+        }, path)
 
     def load_checkpoint(self, path: str):
         ckpt = torch.load(path, map_location=self.device)
         self.actor.load_state_dict(ckpt["actor"])
         self.critic.load_state_dict(ckpt["critic"])
+        if "actor_opt" in ckpt:
+            self.actor_opt.load_state_dict(ckpt["actor_opt"])
+        if "critic_opt" in ckpt:
+            self.critic_opt.load_state_dict(ckpt["critic_opt"])
+        if "policy_variant" in ckpt:
+            self.policy_variant = ckpt["policy_variant"]
+            self.actor.policy_variant = self.policy_variant

@@ -16,7 +16,7 @@ htmlcov/
 venv/
 virtualenv/
 
-# Experimental results, checkpoints, and logs (ignored for now as requested)
+# Experimental results, checkpoints, and logs
 results/
 results_baseline_backup/
 *.pt

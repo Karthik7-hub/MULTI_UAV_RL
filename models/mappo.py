@@ -20,11 +20,13 @@ class ActorNetwork(nn.Module):
         num_offload_actions: int,
         hidden_dim: int = 128,
         max_disp: float = 15.0,
-        policy_variant: str = "pure"  # "pure" (Variant A) or "residual" (Variant B)
+        policy_variant: str = "pure",  # "pure" (Variant A) or "residual" (Variant B)
+        enable_terminal_damping: bool = True
     ):
         super().__init__()
         self.max_disp = max_disp
         self.policy_variant = policy_variant.lower()
+        self.enable_terminal_damping = enable_terminal_damping
         self.backbone = nn.Sequential(
             nn.Linear(obs_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
@@ -91,7 +93,17 @@ class ActorNetwork(nn.Module):
         if self.policy_variant == "residual":
             # Variant B: Residual RL (Nominal APF + Learned Policy Correction)
             nominal_guidance = self.compute_nominal_apf_guidance(obs)
-            raw_move = 0.4 * learned_move + 2.0 * nominal_guidance
+            if self.enable_terminal_damping:
+                station_vec = obs[:, 6:9]
+                dist = torch.norm(station_vec, dim=-1, keepdim=True) * 200.0
+                rl_terminal_damping = torch.clamp((dist - 3.5) / 10.0, 0.0, 1.0)
+                raw_move = (0.4 * rl_terminal_damping) * learned_move + 2.0 * nominal_guidance
+            else:
+                raw_move = 0.4 * learned_move + 2.0 * nominal_guidance
+        elif self.policy_variant == "apf_only":
+            # Variant C: APF Baseline (Zero Learned Guidance, Gain 2.0 APF Alone)
+            nominal_guidance = self.compute_nominal_apf_guidance(obs)
+            raw_move = 2.0 * nominal_guidance
         else:
             # Variant A: Pure MAPPO (100% Neural Policy Output, Zero Injected Guidance)
             raw_move = learned_move
@@ -242,6 +254,7 @@ class MAPPOAgent:
         value_coef: float = 0.5,
         max_grad_norm: float = 0.5,
         policy_variant: str = "pure",
+        enable_terminal_damping: bool = True,
         device: str = "cpu"
     ):
         self.obs_dim = obs_dim
@@ -252,6 +265,7 @@ class MAPPOAgent:
         self.value_coef = value_coef
         self.max_grad_norm = max_grad_norm
         self.policy_variant = policy_variant.lower()
+        self.enable_terminal_damping = enable_terminal_damping
 
         from utils.device import DeviceManager
         if isinstance(device, str):
@@ -263,7 +277,8 @@ class MAPPOAgent:
             obs_dim=obs_dim,
             num_offload_actions=num_offload_actions,
             hidden_dim=hidden_dim,
-            policy_variant=self.policy_variant
+            policy_variant=self.policy_variant,
+            enable_terminal_damping=self.enable_terminal_damping
         ).to(self.device)
         self.critic = CriticNetwork(state_dim, hidden_dim).to(self.device)
 
@@ -413,5 +428,6 @@ class MAPPOAgent:
         if "critic_opt" in ckpt:
             self.critic_opt.load_state_dict(ckpt["critic_opt"])
         if "policy_variant" in ckpt:
-            self.policy_variant = ckpt["policy_variant"]
-            self.actor.policy_variant = self.policy_variant
+            if self.policy_variant != "apf_only":
+                self.policy_variant = ckpt["policy_variant"]
+                self.actor.policy_variant = self.policy_variant

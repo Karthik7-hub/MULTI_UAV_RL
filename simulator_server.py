@@ -23,6 +23,7 @@ sys.path.insert(0, BASE_DIR)
 from config import MasterConfig, ENV_PRESETS
 from env.multi_uav_env import MultiUAVEnv
 from env.safety_filter import SafetyFilter
+from env.observation_builder import build_single_uav_obs
 from models.astar import AStar3DPlanner, PurePursuit3DController
 from models.mappo import MAPPOAgent
 from utils.device import DeviceManager
@@ -44,12 +45,19 @@ pure_agent = MAPPOAgent(
     device=dev
 )
 pure_ckpt = os.path.join(ckpt_dir, "best_mappo_pure_agent.pt")
+pure_agent_loaded = False
+pure_load_error = None
 if os.path.exists(pure_ckpt):
     try:
         pure_agent.load_checkpoint(pure_ckpt)
+        pure_agent_loaded = True
         print("[Simulator] Loaded best_mappo_pure_agent.pt")
     except Exception as e:
-        print("[Simulator] Could not load pure agent checkpoint:", e)
+        pure_load_error = str(e)
+        print("[Simulator] CRITICAL: Could not load pure agent checkpoint:", e)
+else:
+    pure_load_error = f"Checkpoint not found at {pure_ckpt}"
+    print(f"[Simulator] WARNING: {pure_load_error}")
 
 residual_agent = MAPPOAgent(
     obs_dim=20,
@@ -60,12 +68,19 @@ residual_agent = MAPPOAgent(
     device=dev
 )
 residual_ckpt = os.path.join(ckpt_dir, "best_mappo_residual_agent.pt")
+residual_agent_loaded = False
+residual_load_error = None
 if os.path.exists(residual_ckpt):
     try:
         residual_agent.load_checkpoint(residual_ckpt)
+        residual_agent_loaded = True
         print("[Simulator] Loaded best_mappo_residual_agent.pt")
     except Exception as e:
-        print("[Simulator] Could not load residual agent checkpoint:", e)
+        residual_load_error = str(e)
+        print("[Simulator] CRITICAL: Could not load residual agent checkpoint:", e)
+else:
+    residual_load_error = f"Checkpoint not found at {residual_ckpt}"
+    print(f"[Simulator] WARNING: {residual_load_error}")
 
 @app.route("/")
 def index():
@@ -149,46 +164,21 @@ def compute_min_clearance(pos: np.ndarray, obstacles: list, margin: float = 2.0)
     return float(min(clearances)) if clearances else 999.0
 
 def make_obs_vector(pos: np.ndarray, vel: np.ndarray, target: np.ndarray, raw_obs: list) -> np.ndarray:
-    """Builds the verified 20-dim observation vector matching MultiUAVEnv contracts."""
-    obs = np.zeros(20, dtype=np.float32)
-    obs[0:3] = pos / 200.0
-    obs[3:6] = vel / 15.0
-    vec_t = target - pos
-    d_t = float(np.linalg.norm(vec_t))
-    obs[6:9] = vec_t / 200.0
-    obs[9] = d_t / 200.0
-    # Task & channel features
-    obs[10:14] = [0.5, 0.5, 0.5, 0.8]
-    # Peer distances
-    obs[14:17] = [0.5, 0.5, 0.5]
-
-    # Nearest obstacle direction and surface clearance (supports cylinders & spheres)
-    min_obs_d = float("inf")
-    closest_dir = np.array([1.0, 0.0], dtype=np.float32)
-    for obs_item in raw_obs:
-        is_sphere = obs_item.get("type") == "sphere" if isinstance(obs_item, dict) else len(obs_item) == 5
-        if is_sphere:
-            cx, cy, cz, r = obs_item["cx"], obs_item["cy"], obs_item["cz"], obs_item["radius"] if isinstance(obs_item, dict) else (obs_item[0], obs_item[1], obs_item[2], obs_item[3])
-            d_3d = float(np.linalg.norm(pos - np.array([cx, cy, cz])))
-            d_surface = d_3d - r
-            if d_surface < min_obs_d:
-                min_obs_d = d_surface
-                d_xy = float(np.linalg.norm(pos[:2] - np.array([cx, cy])))
-                if d_xy > 1e-4:
-                    closest_dir = (np.array([cx, cy]) - pos[:2]) / d_xy
-        else:
-            cx, cy, r, h = obs_item["cx"], obs_item["cy"], obs_item["radius"], obs_item["height"] if isinstance(obs_item, dict) else (obs_item[0], obs_item[1], obs_item[2], obs_item[3])
-            d_xy = float(np.linalg.norm(pos[:2] - np.array([cx, cy])))
-            d_surface = d_xy - r
-            if d_surface < min_obs_d and pos[2] <= h + 10.0:
-                min_obs_d = d_surface
-                if d_xy > 1e-4:
-                    # MultiUAVEnv contract: vector points towards obstacle center (center - pos)
-                    closest_dir = (np.array([cx, cy]) - pos[:2]) / d_xy
-
-    obs[17:19] = closest_dir
-    obs[19] = np.clip(min_obs_d / 50.0, -1.0, 1.0)
-    return obs
+    """Builds the verified 20-dim observation vector matching MultiUAVEnv contracts using shared builder."""
+    edge_pos = np.array(cfg.airspace.edge_server_pos, dtype=np.float32)
+    return build_single_uav_obs(
+        pos=pos,
+        vel=vel,
+        station_pos=target,
+        edge_pos=edge_pos,
+        obstacles=raw_obs,
+        task_features=None,
+        peer_positions=None,
+        comm_model=None,
+        v_max=cfg.physics.v_max,
+        airspace_bound=cfg.airspace.x_max,
+        num_peers_expected=cfg.physics.num_uavs - 1
+    )
 
 @app.route("/api/plan", methods=["POST"])
 def plan_path():
@@ -321,10 +311,17 @@ def plan_path():
                 acceptance_radius=8.0,
                 decel_dist=15.0
             )
+            if not pure_agent_loaded:
+                return jsonify({
+                    "status": "CHECKPOINT_LOAD_FAILED",
+                    "error": f"Hybrid planner requires Pure MAPPO checkpoint: {pure_load_error}. Silent random execution blocked."
+                }), 500
+
             curr_pos = np.copy(start)
             curr_vel = np.zeros(3, dtype=np.float32)
             path_coords = [curr_pos.tolist()]
             total_interventions = 0
+            consecutive_stalls = 0
 
             for s in range(cfg.mappo.episode_length):
                 d_final = float(np.linalg.norm(curr_pos - target))
@@ -394,6 +391,17 @@ def plan_path():
                 status = "GOAL_REACHED" if float(np.linalg.norm(curr_pos - target)) <= 8.0 else ("CONTROLLER_STALLED" if consecutive_stalls >= 5 else "TIMEOUT / INCOMPLETE")
 
     elif planner_key in ["mappo_pure", "mappo_residual"]:
+        if planner_key == "mappo_pure" and not pure_agent_loaded:
+            return jsonify({
+                "status": "CHECKPOINT_LOAD_FAILED",
+                "error": f"MAPPO Pure checkpoint not loaded: {pure_load_error}. Silent random execution blocked."
+            }), 500
+        if planner_key == "mappo_residual" and not residual_agent_loaded:
+            return jsonify({
+                "status": "CHECKPOINT_LOAD_FAILED",
+                "error": f"MAPPO Residual checkpoint not loaded: {residual_load_error}. Silent random execution blocked."
+            }), 500
+
         agent = pure_agent if planner_key == "mappo_pure" else residual_agent
         agent_name = "Pure MAPPO (No Global Guidance)" if planner_key == "mappo_pure" else "APF-Assisted Residual MAPPO (Ablation)"
         bounds = (cfg.airspace.x_min, cfg.airspace.x_max, cfg.airspace.y_min, cfg.airspace.y_max, cfg.airspace.z_min, cfg.airspace.z_max)

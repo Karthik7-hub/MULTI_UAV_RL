@@ -12,6 +12,7 @@ from config import MasterConfig
 from env.aerodynamics import AerodynamicsModel
 from env.comms_compute import WirelessChannelModel, ComputationManager, TaskGenerator
 from env.safety_filter import SafetyFilter
+from env.observation_builder import build_single_uav_obs
 
 class MultiUAVEnv(gym.Env):
     metadata = {"render_modes": ["human"]}
@@ -538,6 +539,8 @@ class MultiUAVEnv(gym.Env):
             "safety_interventions": interventions,
             "proposed_collisions": safety_stats["proposed_collisions"],
             "actual_collisions": safety_stats["actual_collisions"],
+            "goal_distances": {j: float(np.linalg.norm(self.positions[j] - self.stations[j])) for j in range(self.num_uavs)},
+            "fleet_mean_goal_error": float(np.mean([np.linalg.norm(self.positions[j] - self.stations[j]) for j in range(self.num_uavs)])),
             "terminated": terminated,
             "truncated": truncated,
             "offload_edge": len(edge_offloaders),
@@ -560,74 +563,30 @@ class MultiUAVEnv(gym.Env):
 
     def _get_observations(self) -> Dict[int, np.ndarray]:
         """
-        # =========================================================================
-        # PURPOSE:
-        # Constructs the decentralized local observation vector for each UAV j.
-        #
-        # EXACT FEATURE INDEX BREAKDOWN (Total dimension = 20 for N=4 UAVs):
-        # -------------------------------------------------------------------------
-        # Slice / Index | Feature Description                  | Normalization
-        # -------------------------------------------------------------------------
-        # obs[0:3]      | 3D Position (x, y, z)                | / 200.0 m (Airspace bound)
-        # obs[3:6]      | 3D Velocity (vx, vy, vz)             | / 15.0 m/s (v_max)
-        # obs[6:9]      | Relative Vector to Station (dx,dy,dz)| / 200.0 m
-        # obs[9]        | Euclidean Distance to Station (d_s)  | / 200.0 m
-        # obs[10]       | Task Required CPU Cycles             | / 1.5e9 cycles (max cycles)
-        # obs[11]       | Task Data Size                       | / 3.0e6 bits (max data size)
-        # obs[12]       | Task Latency Deadline                | / 3.0 s (max deadline)
-        # obs[13]       | Wireless Channel Rate to Edge Server | / 1.0e8 bps (100 Mbps)
-        # obs[14:17]    | Relative Distances to Peer UAVs (x3) | / 200.0 m
-        # obs[-3:-1]    | 2D Direction Vector to Closest Obs   | Unit vector (dx/d, dy/d)
-        # obs[-1]       | Distance to Closest Obstacle Surface | / 50.0 m (clipped [-1, 1])
-        # -------------------------------------------------------------------------
-        # Total Dimension: 3 + 3 + 3 + 1 + 3 + 1 + (4-1) + 3 = 20 floats
-        # =========================================================================
+        Constructs the decentralized local observation vector for each UAV j
+        using the unified build_single_uav_obs builder.
         """
         obs = {}
         edge_pos = np.array(self.cfg.airspace.edge_server_pos)
 
         for j in range(self.num_uavs):
-            p_j = self.positions[j]
-            v_j = self.velocities[j]
-            vec_s = self.stations[j] - p_j
-            d_s = float(np.linalg.norm(vec_s))
-
             task = self.current_tasks[j]
-            if task is not None:
-                task_feat = [task.cycles / 1.5e9, task.data_size / 3e6, task.deadline / 3.0]
-            else:
-                task_feat = [0.0, 0.0, 0.0]
+            task_f = (task.cycles, task.data_size, task.deadline) if task is not None else None
+            peer_positions = [self.positions[k] for k in range(self.num_uavs) if k != j]
 
-            d_edge = float(np.linalg.norm(p_j - edge_pos))
-            ch_edge = self.comm.data_rate(d_edge) / 1e8
-
-            peer_dists = []
-            for k in range(self.num_uavs):
-                if k != j:
-                    peer_dists.append(float(np.linalg.norm(p_j - self.positions[k])) / 200.0)
-
-            # Closest obstacle relative vector and surface distance
-            min_obs_d = float("inf")
-            obs_vec = np.zeros(2, dtype=np.float32)
-            for cx, cy, r, h in self.cfg.airspace.obstacles:
-                d_c = float(np.linalg.norm(p_j[:2] - np.array([cx, cy])))
-                d_surf = d_c - r
-                if d_surf < min_obs_d:
-                    min_obs_d = d_surf
-                    obs_vec = (np.array([cx, cy]) - p_j[:2]) / max(1e-4, d_c)
-            obs_feat = [obs_vec[0], obs_vec[1], float(np.clip(min_obs_d / 50.0, -1.0, 1.0))]
-
-            feat = np.concatenate([
-                p_j / 200.0,
-                v_j / self.cfg.physics.v_max,
-                vec_s / 200.0,
-                [d_s / 200.0],
-                task_feat,
-                [ch_edge],
-                peer_dists,
-                obs_feat
-            ]).astype(np.float32)
-            obs[j] = feat
+            obs[j] = build_single_uav_obs(
+                pos=self.positions[j],
+                vel=self.velocities[j],
+                station_pos=self.stations[j],
+                edge_pos=edge_pos,
+                obstacles=self.cfg.airspace.obstacles,
+                task_features=task_f,
+                peer_positions=peer_positions,
+                comm_model=self.comm,
+                v_max=self.cfg.physics.v_max,
+                airspace_bound=200.0,
+                num_peers_expected=self.num_uavs - 1
+            )
         return obs
 
     def _get_global_state(self) -> np.ndarray:

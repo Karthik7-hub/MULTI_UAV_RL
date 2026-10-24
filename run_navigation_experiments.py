@@ -37,10 +37,10 @@ from models.maddpg import MADDPGAgent
 from models.cppo import CPPOAgent
 from plots.render_publication_figures import plot_publication_3d_trajectory_benchmark
 
-def run_navigation_suite(seed: int = 101, device: str = "auto", preset: str = "benchmark", num_uavs: int = 4) -> pd.DataFrame:
+def run_navigation_suite(seed: int = 101, device: str = "auto", preset: str = "benchmark", num_uavs: int = 4, output_dir: str = None) -> pd.DataFrame:
     base_dir = os.path.dirname(os.path.abspath(__file__))
-    res_dir = os.path.join(base_dir, "results")
-    ckpt_dir = os.path.join(res_dir, "checkpoints")
+    res_dir = os.path.abspath(output_dir) if output_dir else os.path.join(base_dir, "results")
+    ckpt_dir = os.path.join(base_dir, "results", "checkpoints")
     fig_dir = os.path.join(res_dir, "figures")
     os.makedirs(res_dir, exist_ok=True)
     os.makedirs(fig_dir, exist_ok=True)
@@ -119,7 +119,13 @@ def run_navigation_suite(seed: int = 101, device: str = "auto", preset: str = "b
             break
     agents["cppo"] = cppo
 
-    # Hierarchical A* + MAPPO (Hybrid)
+    # Pure APF Controller (Ablation: Nominal gain 2.0, zero learning)
+    agents["apf_only"] = MAPPOAgent(env.obs_dim, env.state_dim, num_uavs, num_uavs + 1, cfg.mappo.hidden_dim, policy_variant="apf_only", device=dev)
+
+    # 3D A* + Pure Pursuit (No RL Ablation: 100% Classical corner-cutting tracking)
+    agents["astar_pure_pursuit"] = HybridAStarMAPPONavigator(env, mappo_agent=None)
+
+    # Hierarchical A* + MAPPO (Hybrid: A* + Pure Pursuit + MAPPO Discrete Offloader)
     agents["hybrid_astar_mappo"] = HybridAStarMAPPONavigator(env, mappo_agent=mappo_residual)
 
     # 2. Simulate & Record Trajectories
@@ -129,14 +135,16 @@ def run_navigation_suite(seed: int = 101, device: str = "auto", preset: str = "b
 
     algo_order = [
         ("3D A* Baseline", "astar"),
+        ("3D A* + Pure Pursuit (Zero RL)", "astar_pure_pursuit"),
+        ("Hierarchical A* + MAPPO (Hybrid)", "hybrid_astar_mappo"),
         ("3D RRT* (Optimal Tree)", "rrt_star"),
         ("3D SAPF (Adaptive Potential Field)", "sapf"),
+        ("APF-Only Controller (Zero Learning)", "apf_only"),
         ("Centralized PPO (CPPO)", "cppo"),
         ("Independent PPO (IPPO)", "ippo"),
         ("Multi-Agent DDPG (MADDPG)", "maddpg"),
         ("Proposed Pure MAPPO (No APF)", "mappo_pure"),
-        ("APF-Assisted Residual MAPPO", "mappo_residual"),
-        ("Hierarchical A* + MAPPO (Hybrid)", "hybrid_astar_mappo")
+        ("APF-Assisted Residual MAPPO", "mappo_residual")
     ]
 
     initial_positions = {}
@@ -158,7 +166,7 @@ def run_navigation_suite(seed: int = 101, device: str = "auto", preset: str = "b
 
         # Measure planning time if available
         t_plan_start = time.time()
-        if key in ["astar", "rrt_star", "sapf", "hybrid_astar_mappo"]:
+        if key in ["astar", "rrt_star", "sapf", "hybrid_astar_mappo", "astar_pure_pursuit"]:
             # Pre-plan / warm-up step
             _ = agent.select_actions(obs)
             total_plan_time = (time.time() - t_plan_start) * 1000.0 / num_uavs
@@ -191,11 +199,11 @@ def run_navigation_suite(seed: int = 101, device: str = "auto", preset: str = "b
         last_info = {}
 
         for t in range(1, cfg.mappo.episode_length + 1):
-            if key in ["astar", "rrt_star", "sapf", "hybrid_astar_mappo"]:
+            if key in ["astar", "rrt_star", "sapf", "hybrid_astar_mappo", "astar_pure_pursuit"]:
                 actions = agent.select_actions(obs)
             elif key == "cppo":
                 actions, _, _, _ = agent.get_actions(state, deterministic=True)
-            elif key in ["mappo", "mappo_pure", "mappo_residual", "ippo"]:
+            elif key in ["mappo", "mappo_pure", "mappo_residual", "ippo", "apf_only"]:
                 actions, _, _, _ = agent.get_actions(obs, deterministic=True)
             elif key == "maddpg":
                 actions, _ = agent.get_actions(obs, explore=False)
@@ -256,7 +264,8 @@ def run_navigation_suite(seed: int = 101, device: str = "auto", preset: str = "b
         nav_summary_rows.append({
             "Algorithm": label,
             "Key": key,
-            "Mean Path Length (m)": round(mean_path_len, 2),
+            "UAV Mean Path (m)": round(mean_path_len, 2),
+            "Fleet Total Path (m)": round(float(np.sum(path_lengths)), 2),
             "Arrival Time (s)": round(mean_arrival_time, 1),
             "Nav Energy (kJ)": round(nav_energy_kj, 2),
             "Service Energy (kJ)": round(service_energy_kj, 2),
@@ -308,7 +317,8 @@ if __name__ == "__main__":
     parser.add_argument("--device", type=str, default="auto", choices=["auto", "cuda", "cpu"])
     parser.add_argument("--preset", type=str, default="benchmark", choices=["benchmark", "metropolis", "chokepoint", "canyon"], help="Airspace scenario preset")
     parser.add_argument("--num_uavs", type=int, default=4, help="Fleet size")
+    parser.add_argument("--output_dir", type=str, default=None, help="Directory to save benchmark CSV and figures")
     args = parser.parse_args()
 
-    run_navigation_suite(seed=args.seed, device=args.device, preset=args.preset, num_uavs=args.num_uavs)
+    run_navigation_suite(seed=args.seed, device=args.device, preset=args.preset, num_uavs=args.num_uavs, output_dir=args.output_dir)
 

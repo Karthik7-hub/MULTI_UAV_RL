@@ -62,6 +62,9 @@ class NearestFeasiblePolicy(BaseOffloadingHeuristic):
 
 class LowestLatencyPolicy(BaseOffloadingHeuristic):
     """Greedily selects the destination minimizing estimated end-to-end task completion latency."""
+    def __init__(self, queue_aware: bool = True):
+        self.queue_aware = queue_aware
+
     def select_offload_action(self, uav_id: int, env) -> int:
         task = env.current_tasks[uav_id]
         if task is None:
@@ -70,8 +73,9 @@ class LowestLatencyPolicy(BaseOffloadingHeuristic):
         pos = env.positions[uav_id]
         edge_pos = np.array(env.cfg.airspace.edge_server_pos)
 
-        # 1. Local estimated latency
-        t_local = task.cycles / env.cfg.comp.f_local
+        # 1. Local estimated latency (including local queue backlog if queue_aware)
+        q_local = env.comp.local_queues.get(uav_id, 0.0) if self.queue_aware else 0.0
+        t_local = (q_local + task.cycles) / env.cfg.comp.f_local
 
         # 2. Peer estimated latency (scan all peers)
         best_peer_offset = 1
@@ -81,17 +85,21 @@ class LowestLatencyPolicy(BaseOffloadingHeuristic):
             d_p = float(np.linalg.norm(pos - env.positions[peer_idx]))
             r_p = env.comm.data_rate(d_p, num_concurrent=1)
             t_tx = task.data_size / max(1e3, r_p)
-            t_comp = task.cycles / env.cfg.comp.f_peer
+            q_peer = env.comp.peer_queues.get(peer_idx, 0.0) if self.queue_aware else 0.0
+            t_comp = (q_peer + task.cycles) / env.cfg.comp.f_peer
             t_peer = t_tx + t_comp
             if t_peer < min_peer_t:
                 min_peer_t = t_peer
                 best_peer_offset = p_offset
 
-        # 3. Edge server estimated latency
+        # 3. Edge server estimated latency (including transmission contention & edge queue backlog)
         d_edge = float(np.linalg.norm(pos - edge_pos))
-        r_edge = env.comm.data_rate(d_edge, num_concurrent=1)
+        r_edge = env.comm.data_rate(d_edge, num_concurrent=env.num_uavs)
         t_edge_tx = task.data_size / max(1e3, r_edge)
-        t_edge_comp = task.cycles / env.cfg.comp.f_edge
+        bg_load = getattr(env.comp, "edge_background_load", 2)
+        eff_f_edge = env.cfg.comp.f_edge / max(1, bg_load + 1)
+        q_edge = env.comp.edge_queue if self.queue_aware else 0.0
+        t_edge_comp = (q_edge + task.cycles) / eff_f_edge
         t_edge = t_edge_tx + t_edge_comp
 
         candidates = [t_local, min_peer_t, t_edge]
@@ -114,29 +122,13 @@ class EnergyDeadlineAwareGreedyPolicy(BaseOffloadingHeuristic):
     # MATHEMATICAL FORMULATION:
     # J(k) = T_total(k) + w_E * E(k) + lambda_penalty * I( T_total(k) > T_max )
     #
-    # 1. Candidate Latencies & Energies:
-    #    - Local Node (k=0):
-    #        T_local = C / f_local [seconds]
-    #        E_local = kappa * (f_local)^2 * C [Joules]
-    #    - Peer UAVs (k in 1..N-1):
-    #        T_peer = (D / R_peer(d_p)) + (C / f_peer) [seconds]
-    #        E_peer = P_tx * (D / R_peer(d_p)) [Joules]
-    #    - Ground Edge Server (k=N):
-    #        T_edge = (D / R_edge(d_e)) + (C / f_edge) [seconds]
-    #        E_edge = P_tx * (D / R_edge(d_e)) [Joules]
-    #
-    # 2. Penalty for Deadline Violation:
-    #    I(condition) = 1.0 if T_total > T_max, else 0.0.
-    #    If the task cannot finish before deadline T_max, a heavy penalty (10.0) is added.
-    #
-    # 3. Parameters:
-    #    - weight_energy (w_E) = 0.005: Trade-off factor converting Joules to seconds-equivalent.
-    #    - deadline_penalty (lambda_penalty) = 10.0: Penalty for missing latency deadline.
+    # Incorporates realistic queue backlog and multi-tenant slicing dynamics.
     # =========================================================================
     """
-    def __init__(self, weight_energy: float = 0.005, deadline_penalty: float = 10.0):
+    def __init__(self, weight_energy: float = 0.005, deadline_penalty: float = 10.0, queue_aware: bool = True):
         self.weight_energy = weight_energy
         self.deadline_penalty = deadline_penalty
+        self.queue_aware = queue_aware
 
     def select_offload_action(self, uav_id: int, env) -> int:
         task = env.current_tasks[uav_id]
@@ -150,7 +142,8 @@ class EnergyDeadlineAwareGreedyPolicy(BaseOffloadingHeuristic):
         choices = []  # tuples of (cost, action_idx)
 
         # 1. Local execution
-        t_local = task.cycles / env.cfg.comp.f_local
+        q_local = env.comp.local_queues.get(uav_id, 0.0) if self.queue_aware else 0.0
+        t_local = (q_local + task.cycles) / env.cfg.comp.f_local
         e_local = env.cfg.comp.kappa * (env.cfg.comp.f_local ** 2) * task.cycles
         miss_local = 1.0 if t_local > deadline else 0.0
         cost_local = t_local + self.weight_energy * e_local + self.deadline_penalty * miss_local
@@ -163,18 +156,22 @@ class EnergyDeadlineAwareGreedyPolicy(BaseOffloadingHeuristic):
             r_p = env.comm.data_rate(d_p, num_concurrent=1)
             t_tx = task.data_size / max(1e3, r_p)
             e_tx = env.comm.tx_power * t_tx
-            t_comp = task.cycles / env.cfg.comp.f_peer
+            q_peer = env.comp.peer_queues.get(peer_idx, 0.0) if self.queue_aware else 0.0
+            t_comp = (q_peer + task.cycles) / env.cfg.comp.f_peer
             t_total = t_tx + t_comp
             miss_peer = 1.0 if t_total > deadline else 0.0
             cost_peer = t_total + self.weight_energy * e_tx + self.deadline_penalty * miss_peer
             choices.append((cost_peer, p_offset))
 
-        # 3. Edge Server execution
+        # 3. Edge Server execution (including queue backlog and multi-tenant slicing)
         d_edge = float(np.linalg.norm(pos - edge_pos))
-        r_edge = env.comm.data_rate(d_edge, num_concurrent=1)
+        r_edge = env.comm.data_rate(d_edge, num_concurrent=env.num_uavs)
         t_tx_edge = task.data_size / max(1e3, r_edge)
         e_tx_edge = env.comm.tx_power * t_tx_edge
-        t_comp_edge = task.cycles / env.cfg.comp.f_edge
+        bg_load = getattr(env.comp, "edge_background_load", 2)
+        eff_f_edge = env.cfg.comp.f_edge / max(1, bg_load + 1)
+        q_edge = env.comp.edge_queue if self.queue_aware else 0.0
+        t_comp_edge = (q_edge + task.cycles) / eff_f_edge
         t_edge_total = t_tx_edge + t_comp_edge
         miss_edge = 1.0 if t_edge_total > deadline else 0.0
         cost_edge = t_edge_total + self.weight_energy * e_tx_edge + self.deadline_penalty * miss_edge
