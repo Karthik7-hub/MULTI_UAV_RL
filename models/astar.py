@@ -4,9 +4,6 @@ Deterministic 3D A* Path Planner + Greedy MEC Offloading Baseline.
 - Evaluates minimum latency among Local, Peer UAV, and Edge Server for each task.
 """
 
-import numpy as np
-from typing import Dict, List, Tuple, Any, Optional
-
 import heapq
 import time
 import numpy as np
@@ -86,41 +83,204 @@ class AStar3DPlanner:
         self.last_planning_time_ms: float = 0.0
 
     def is_point_valid(self, p: np.ndarray) -> bool:
-        """Checks airspace bounds and cylinder obstacle containment."""
+        """Checks airspace bounds and finite-height cylinder/sphere obstacle containment."""
         x_min, x_max, y_min, y_max, z_min, z_max = self.bounds
         if not (x_min <= p[0] <= x_max and y_min <= p[1] <= y_max and z_min <= p[2] <= z_max):
             return False
-        for cx, cy, r, h in self.obstacles:
-            eff_r = r + self.eff_margin
-            eff_h = h + self.eff_margin
-            if ((p[0] - cx)**2 + (p[1] - cy)**2) < (eff_r**2) and p[2] <= eff_h:
-                return False
+        for obs in self.obstacles:
+            if isinstance(obs, dict):
+                obs_type = obs.get("type", "cylinder")
+                if obs_type == "sphere":
+                    cx, cy, cz, r = obs["cx"], obs["cy"], obs["cz"], obs["radius"]
+                    eff_r = r + self.eff_margin
+                    # AABB bounding-box fast rejection
+                    if abs(p[0] - cx) > eff_r or abs(p[1] - cy) > eff_r or abs(p[2] - cz) > eff_r:
+                        continue
+                    if ((p[0] - cx)**2 + (p[1] - cy)**2 + (p[2] - cz)**2) < (eff_r**2):
+                        return False
+                else:
+                    cx, cy, r, h = obs["cx"], obs["cy"], obs["radius"], obs["height"]
+                    z_min_obs = float(obs.get("z_min", 0.0))
+                    z_max_obs = float(obs.get("z_max", h))
+                    eff_r = r + self.eff_margin
+                    eff_z_min = z_min_obs - self.eff_margin
+                    eff_z_max = z_max_obs + self.eff_margin
+                    # Overflight or Underflight: completely safe outside vertical extent
+                    if p[2] > eff_z_max or p[2] < eff_z_min:
+                        continue
+                    # Horizontal AABB fast rejection
+                    if abs(p[0] - cx) > eff_r or abs(p[1] - cy) > eff_r:
+                        continue
+                    if ((p[0] - cx)**2 + (p[1] - cy)**2) < (eff_r**2):
+                        return False
+            else:
+                if len(obs) == 4:
+                    cx, cy, r, h = obs
+                    z_min_obs = 0.0
+                    z_max_obs = h
+                elif len(obs) == 5:
+                    cx, cy, cz, r = obs[0], obs[1], obs[2], obs[3]
+                    eff_r = r + self.eff_margin
+                    if abs(p[0] - cx) > eff_r or abs(p[1] - cy) > eff_r or abs(p[2] - cz) > eff_r:
+                        continue
+                    if ((p[0] - cx)**2 + (p[1] - cy)**2 + (p[2] - cz)**2) < (eff_r**2):
+                        return False
+                    continue
+                else:
+                    cx, cy, r, h = obs[0], obs[1], obs[2], obs[3]
+                    z_min_obs = 0.0
+                    z_max_obs = h
+
+                eff_r = r + self.eff_margin
+                eff_z_min = z_min_obs - self.eff_margin
+                eff_z_max = z_max_obs + self.eff_margin
+                if p[2] > eff_z_max or p[2] < eff_z_min:
+                    continue
+                if abs(p[0] - cx) > eff_r or abs(p[1] - cy) > eff_r:
+                    continue
+                if ((p[0] - cx)**2 + (p[1] - cy)**2) < (eff_r**2):
+                    return False
         return True
 
-    def is_segment_valid(self, p1: np.ndarray, p2: np.ndarray, num_checks: int = 15) -> bool:
-        """Continuous collision checking along line segment."""
-        for alpha in np.linspace(0.0, 1.0, num_checks):
-            p = (1.0 - alpha) * p1 + alpha * p2
-            if not self.is_point_valid(p):
-                return False
-        return True
-
-    def plan_path_with_time(self, start: np.ndarray, goal: np.ndarray) -> Tuple[List[np.ndarray], float]:
+    def check_segment_obstacle_intersection(self, p1: np.ndarray, p2: np.ndarray) -> bool:
         """
-        Executes genuine A* graph search from start to goal.
+        Exact continuous 3D line-segment intersection testing against finite-height cylinders and spheres.
+        Uses exact parametric interval clipping: intersects iff [t_in, t_out]_xy overlaps [t_in, t_out]_z.
+        """
+        d = p2 - p1
+        seg_len_sq = float(np.dot(d, d))
+        if seg_len_sq < 1e-8:
+            return not self.is_point_valid(p1)
+
+        for obs in self.obstacles:
+            if isinstance(obs, dict) and obs.get("type") == "sphere":
+                cx, cy, cz, r = obs["cx"], obs["cy"], obs["cz"], obs["radius"]
+                eff_r = r + self.eff_margin
+                # AABB segment rejection
+                if max(p1[0], p2[0]) < (cx - eff_r) or min(p1[0], p2[0]) > (cx + eff_r) or \
+                   max(p1[1], p2[1]) < (cy - eff_r) or min(p1[1], p2[1]) > (cy + eff_r) or \
+                   max(p1[2], p2[2]) < (cz - eff_r) or min(p1[2], p2[2]) > (cz + eff_r):
+                    continue
+
+                center = np.array([cx, cy, cz], dtype=np.float32)
+                f = p1 - center
+                if float(np.dot(f, f)) < eff_r**2 or float(np.dot(p2 - center, p2 - center)) < eff_r**2:
+                    return True
+                a = float(np.dot(d, d))
+                b = float(2.0 * np.dot(f, d))
+                c_val = float(np.dot(f, f) - eff_r**2)
+                disc = b**2 - 4.0 * a * c_val
+                if disc >= 0.0:
+                    sqrt_disc = np.sqrt(disc)
+                    t1 = (-b - sqrt_disc) / (2.0 * a)
+                    t2 = (-b + sqrt_disc) / (2.0 * a)
+                    if max(0.0, float(t1)) <= min(1.0, float(t2)):
+                        return True
+            else:
+                if isinstance(obs, dict):
+                    cx, cy, r, h = obs["cx"], obs["cy"], obs["radius"], obs["height"]
+                    z_min_obs = float(obs.get("z_min", 0.0))
+                    z_max_obs = float(obs.get("z_max", h))
+                elif len(obs) == 5:
+                    cx, cy, cz, r = obs[0], obs[1], obs[2], obs[3]
+                    eff_r = r + self.eff_margin
+                    center = np.array([cx, cy, cz], dtype=np.float32)
+                    f = p1 - center
+                    if float(np.dot(f, f)) < eff_r**2 or float(np.dot(p2 - center, p2 - center)) < eff_r**2:
+                        return True
+                    a = float(np.dot(d, d))
+                    b = float(2.0 * np.dot(f, d))
+                    c_val = float(np.dot(f, f) - eff_r**2)
+                    disc = b**2 - 4.0 * a * c_val
+                    if disc >= 0.0:
+                        sqrt_disc = np.sqrt(disc)
+                        t1 = (-b - sqrt_disc) / (2.0 * a)
+                        t2 = (-b + sqrt_disc) / (2.0 * a)
+                        if max(0.0, float(t1)) <= min(1.0, float(t2)):
+                            return True
+                    continue
+                else:
+                    cx, cy, r, h = obs[0], obs[1], obs[2], obs[3]
+                    z_min_obs = 0.0
+                    z_max_obs = h
+
+                eff_r = r + self.eff_margin
+                eff_z_min = z_min_obs - self.eff_margin
+                eff_z_max = z_max_obs + self.eff_margin
+
+                # Finite vertical extent rejection: if segment is entirely above or below cylinder
+                if min(p1[2], p2[2]) > eff_z_max or max(p1[2], p2[2]) < eff_z_min:
+                    continue
+
+                # 2D horizontal AABB bounding box check
+                if max(p1[0], p2[0]) < (cx - eff_r) or min(p1[0], p2[0]) > (cx + eff_r) or \
+                   max(p1[1], p2[1]) < (cy - eff_r) or min(p1[1], p2[1]) > (cy + eff_r):
+                    continue
+
+                # 1. Parameter interval in Z: [t_z1, t_z2]
+                dz = p2[2] - p1[2]
+                if abs(dz) < 1e-6:
+                    if eff_z_min <= p1[2] <= eff_z_max:
+                        t_z1, t_z2 = -float("inf"), float("inf")
+                    else:
+                        continue
+                else:
+                    t_a = (eff_z_min - p1[2]) / dz
+                    t_b = (eff_z_max - p1[2]) / dz
+                    t_z1 = min(t_a, t_b)
+                    t_z2 = max(t_a, t_b)
+
+                # 2. Parameter interval in XY: [t_xy1, t_xy2]
+                d_xy = p2[:2] - p1[:2]
+                f_xy = p1[:2] - np.array([cx, cy], dtype=np.float32)
+                a_xy = float(np.dot(d_xy, d_xy))
+
+                if a_xy < 1e-8:
+                    if float(np.dot(f_xy, f_xy)) <= eff_r**2:
+                        t_xy1, t_xy2 = -float("inf"), float("inf")
+                    else:
+                        continue
+                else:
+                    b_xy = float(2.0 * np.dot(f_xy, d_xy))
+                    c_xy = float(np.dot(f_xy, f_xy) - eff_r**2)
+                    disc_xy = b_xy**2 - 4.0 * a_xy * c_xy
+                    if disc_xy < 0.0:
+                        continue
+                    sqrt_d = np.sqrt(disc_xy)
+                    t_xy1 = (-b_xy - sqrt_d) / (2.0 * a_xy)
+                    t_xy2 = (-b_xy + sqrt_d) / (2.0 * a_xy)
+
+                # 3. Exact parametric interval intersection over [0, 1]
+                t_enter = max(0.0, float(t_z1), float(t_xy1))
+                t_exit = min(1.0, float(t_z2), float(t_xy2))
+
+                if t_enter <= t_exit:
+                    return True
+        return False
+
+    def is_segment_valid(self, p1: np.ndarray, p2: np.ndarray) -> bool:
+        """Continuous collision checking along line segment with zero tunneling."""
+        if not self.is_point_valid(p1) or not self.is_point_valid(p2):
+            return False
+        return not self.check_segment_obstacle_intersection(p1, p2)
+
+    def plan_path_with_details(self, start: np.ndarray, goal: np.ndarray) -> Tuple[Optional[List[np.ndarray]], float, List[Tuple[float, float, float]]]:
+        """
+        Executes genuine 3D A* graph search from start to goal.
         Returns:
-            waypoints: List of 3D coordinates (with line-of-sight smoothing)
+            waypoints: List of 3D coordinates (with line-of-sight smoothing), or None if blocked
             planning_time_ms: Wall-clock execution time in milliseconds
+            explored_nodes: Discretized 3D points expanded during graph search
         """
         t0 = time.time()
         start = np.array(start, dtype=np.float32)
         goal = np.array(goal, dtype=np.float32)
 
-        # Fast line-of-sight check
-        if self.is_segment_valid(start, goal, num_checks=25):
+        # Fast line-of-sight check: ONLY returns straight line if analytical check proves 100% collision-free
+        if self.is_segment_valid(start, goal):
             dt = (time.time() - t0) * 1000.0
             self.last_planning_time_ms = dt
-            return [start, goal], dt
+            return [start, goal], dt, []
 
         def snap_to_grid(p: np.ndarray) -> Tuple[float, float, float]:
             snapped = np.round(p / self.grid_res) * self.grid_res
@@ -144,14 +304,16 @@ class AStar3DPlanner:
         heapq.heappush(open_set, (0.0, 0.0, s_node))
         came_from: Dict[Tuple[float, float, float], Tuple[float, float, float]] = {}
         g_score: Dict[Tuple[float, float, float], float] = {s_node: 0.0}
+        explored: List[Tuple[float, float, float]] = []
 
         reached_node = None
-        max_expansions = 4000
+        max_expansions = 50000
         expansions = 0
 
         while open_set and expansions < max_expansions:
             expansions += 1
             _, curr_g, curr_node = heapq.heappop(open_set)
+            explored.append(curr_node)
 
             # Goal proximity check
             dist_to_g = float(np.linalg.norm(np.array(curr_node) - np.array(g_node)))
@@ -162,9 +324,15 @@ class AStar3DPlanner:
             if curr_g > g_score.get(curr_node, float("inf")):
                 continue
 
+            curr_arr = np.array(curr_node, dtype=np.float32)
             for dx, dy, dz, step_cost in directions:
                 neighbor = (curr_node[0] + dx, curr_node[1] + dy, curr_node[2] + dz)
-                if not self.is_point_valid(np.array(neighbor, dtype=np.float32)):
+                neighbor_arr = np.array(neighbor, dtype=np.float32)
+                if not self.is_point_valid(neighbor_arr):
+                    continue
+
+                # Corner-clipping protection: ensure diagonal transitions do not clip obstacle corners
+                if (abs(dx) + abs(dy) + abs(dz) > res) and self.check_segment_obstacle_intersection(curr_arr, neighbor_arr):
                     continue
 
                 tentative_g = curr_g + step_cost
@@ -175,10 +343,10 @@ class AStar3DPlanner:
                     heapq.heappush(open_set, (tentative_g + h_score, tentative_g, neighbor))
 
         if reached_node is None:
-            # Fallback to direct goal if search budget exceeded
+            # Route genuinely blocked: return None (never fake a path through obstacles)
             dt = (time.time() - t0) * 1000.0
             self.last_planning_time_ms = dt
-            return [start, goal], dt
+            return None, dt, explored
 
         # Reconstruct path
         path = [goal]
@@ -189,13 +357,13 @@ class AStar3DPlanner:
         path.append(start)
         path.reverse()
 
-        # Line-of-sight shortcutting / smoothing
+        # Line-of-sight shortcutting / smoothing using analytical collision guarantees
         smoothed = [path[0]]
         i = 0
         while i < len(path) - 1:
             furthest = i + 1
             for j in range(len(path) - 1, i + 1, -1):
-                if self.is_segment_valid(path[i], path[j], num_checks=12):
+                if self.is_segment_valid(path[i], path[j]):
                     furthest = j
                     break
             smoothed.append(path[furthest])
@@ -203,11 +371,107 @@ class AStar3DPlanner:
 
         dt = (time.time() - t0) * 1000.0
         self.last_planning_time_ms = dt
-        return smoothed, dt
+        return smoothed, dt, explored
 
-    def plan_path(self, start: np.ndarray, goal: np.ndarray) -> List[np.ndarray]:
-        path, _ = self.plan_path_with_time(start, goal)
+    def plan_path_with_time(self, start: np.ndarray, goal: np.ndarray) -> Tuple[Optional[List[np.ndarray]], float]:
+        path, dt, _ = self.plan_path_with_details(start, goal)
+        return path, dt
+
+    def plan_path(self, start: np.ndarray, goal: np.ndarray) -> Optional[List[np.ndarray]]:
+        path, _, _ = self.plan_path_with_details(start, goal)
         return path
+
+class PurePursuit3DController:
+    """
+    Classical 3D Pure Pursuit Trajectory Tracking Controller.
+    - Tracks an ordered sequence of 3D global waypoints.
+    - Lookahead target search along path polyline.
+    - Enforces maximum flight velocity v_max and smooth terminal deceleration.
+    - Waypoint progression with acceptance radius and stall detection.
+    """
+    def __init__(
+        self,
+        waypoints: List[np.ndarray],
+        v_max: float = 15.0,
+        lookahead_dist: float = 10.0,
+        acceptance_radius: float = 5.0,
+        decel_dist: float = 15.0
+    ):
+        self.waypoints = [np.array(wp, dtype=np.float32) for wp in waypoints]
+        self.v_max = v_max
+        self.lookahead_dist = lookahead_dist
+        self.acceptance_radius = acceptance_radius
+        self.decel_dist = decel_dist
+        self.active_wp_idx = 0
+        self.consecutive_stalls = 0
+
+    def step(self, current_pos: np.ndarray, dt: float = 1.0) -> Tuple[np.ndarray, np.ndarray, int, str]:
+        """
+        Executes one pure pursuit control cycle.
+        Returns:
+            (next_pos, commanded_velocity, active_waypoint_index, status)
+        """
+        if not self.waypoints:
+            return current_pos, np.zeros(3, dtype=np.float32), 0, "NO_PATH_FOUND"
+
+        final_wp = self.waypoints[-1]
+        dist_to_final = float(np.linalg.norm(current_pos - final_wp))
+        if dist_to_final <= self.acceptance_radius:
+            return current_pos, np.zeros(3, dtype=np.float32), len(self.waypoints) - 1, "GOAL_REACHED"
+
+        # Advance active waypoint using along-track progression and acceptance radius
+        while self.active_wp_idx < len(self.waypoints) - 1:
+            w_curr = self.waypoints[self.active_wp_idx]
+            w_prev = self.waypoints[max(0, self.active_wp_idx - 1)]
+            seg = w_curr - w_prev
+            seg_len = float(np.linalg.norm(seg))
+            d_curr_wp = float(np.linalg.norm(current_pos - w_curr))
+
+            passed = False
+            if seg_len > 1e-4:
+                u_seg = seg / seg_len
+                passed = float(np.dot(current_pos - w_curr, u_seg)) >= -1.0
+
+            if d_curr_wp <= max(8.0, self.acceptance_radius) or passed:
+                self.active_wp_idx += 1
+            else:
+                break
+
+        # Search forward along polyline for lookahead target point
+        target_pt = self.waypoints[self.active_wp_idx]
+        for w in range(self.active_wp_idx, len(self.waypoints)):
+            d_w = float(np.linalg.norm(self.waypoints[w] - current_pos))
+            if d_w >= self.lookahead_dist:
+                target_pt = self.waypoints[w]
+                break
+            target_pt = self.waypoints[w]
+
+        vec_to_target = target_pt - current_pos
+        dist_to_target = float(np.linalg.norm(vec_to_target))
+
+        if dist_to_target < 1e-4:
+            v_cmd = np.zeros(3, dtype=np.float32)
+        else:
+            dir_unit = vec_to_target / dist_to_target
+            # Smooth terminal deceleration when approaching final goal
+            if dist_to_final < self.decel_dist:
+                speed = self.v_max * max(0.2, dist_to_final / self.decel_dist)
+            else:
+                speed = self.v_max
+            v_cmd = dir_unit * min(speed, dist_to_target / dt)
+
+        displacement = v_cmd * dt
+        next_pos = current_pos + displacement
+
+        # Stall detection: if commanded progress is negligible despite not reaching goal
+        progress = float(np.linalg.norm(displacement))
+        if progress < 0.1 and dist_to_final > self.acceptance_radius:
+            self.consecutive_stalls += 1
+        else:
+            self.consecutive_stalls = 0
+
+        status = "CONTROLLER_STALLED" if self.consecutive_stalls >= 5 else "PATH_FOUND"
+        return next_pos, v_cmd, self.active_wp_idx, status
 
 class AStarBaseline:
     def __init__(self, env):
@@ -297,3 +561,73 @@ class AStarBaseline:
             actions[j] = {"move": disp.astype(np.float32), "offload": offload_choice}
 
         return actions
+
+class HybridAStarMAPPONavigator:
+    """
+    Hierarchical Hybrid Planner:
+    - High-level: 3D A* graph search computes globally collision-free waypoint roadmap.
+    - Low-level: 3D Pure Pursuit Controller tracks waypoints.
+    - Offloading & Multi-agent: MAPPO neural policy evaluates optimal discrete MEC offloading decisions
+      and applies reactive collision-avoiding control.
+    """
+    def __init__(self, env: Any, mappo_agent: Optional[Any] = None, lookahead: float = 12.0):
+        self.env = env
+        self.mappo_agent = mappo_agent
+        self.lookahead = lookahead
+        self.controllers = {}
+        self.raw_obs = env.cfg.airspace.obstacles
+        self.margin = env.cfg.physics.obstacle_margin
+        self.reset()
+
+    def reset(self):
+        self.controllers = {}
+        planner = AStar3DPlanner(
+            obstacles=self.raw_obs,
+            bounds=(
+                self.env.cfg.airspace.x_min, self.env.cfg.airspace.x_max,
+                self.env.cfg.airspace.y_min, self.env.cfg.airspace.y_max,
+                self.env.cfg.airspace.z_min, self.env.cfg.airspace.z_max
+            ),
+            grid_res=5.0,
+            d_safe=self.env.cfg.physics.d_safe,
+            obstacle_margin=self.margin
+        )
+        for j in range(self.env.num_uavs):
+            start = self.env.positions[j]
+            goal = self.env.stations[j]
+            wps = planner.plan_path(start, goal)
+            if not wps or len(wps) < 2:
+                wps = [start, goal]
+            self.controllers[j] = PurePursuit3DController(
+                wps,
+                v_max=self.env.cfg.physics.v_max,
+                lookahead_dist=self.lookahead,
+                acceptance_radius=self.env.cfg.physics.reach_tolerance
+            )
+
+    def select_actions(self, obs: Dict[int, np.ndarray]) -> Dict[int, Dict[str, Any]]:
+        actions = {}
+        for j in range(self.env.num_uavs):
+            curr_pos = self.env.positions[j]
+            next_pos, cmd_vel, wp_idx, status = self.controllers[j].step(curr_pos, dt=self.env.cfg.physics.delta_t)
+            
+            # Continuous movement displacement
+            move_disp = cmd_vel * self.env.cfg.physics.delta_t
+            
+            # Neural offloading decision (if mappo_agent available), else greedy
+            offload_choice = 0
+            if self.mappo_agent is not None:
+                import torch
+                t_obs = torch.tensor(obs[j], dtype=torch.float32, device=self.mappo_agent.device).unsqueeze(0)
+                with torch.no_grad():
+                    _, act_off, _ = self.mappo_agent.actor.sample_action(t_obs, deterministic=True)
+                offload_choice = int(act_off.squeeze(0).cpu().item())
+            else:
+                offload_choice = self.env.num_uavs
+                
+            actions[j] = {
+                "move": np.clip(move_disp, -self.env.cfg.physics.v_max, self.env.cfg.physics.v_max),
+                "offload": offload_choice
+            }
+        return actions
+

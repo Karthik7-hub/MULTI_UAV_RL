@@ -6,22 +6,68 @@ Single source of truth for physical, communication, computation, and RL hyperpar
 from dataclasses import dataclass, field
 from typing import List, Tuple
 
+ENV_PRESETS = {
+    "benchmark": [
+        (142.5, 100.0, 10.0, 80.0),  # East corridor
+        (100.0, 142.5, 10.0, 85.0),  # North corridor
+        (57.5, 100.0, 10.0, 80.0),   # West corridor
+        (100.0, 57.5, 10.0, 75.0),   # South corridor
+    ],
+    "metropolis": [
+        (140.0, 100.0, 10.0, 85.0),
+        (100.0, 140.0, 10.0, 90.0),
+        (60.0, 100.0, 10.0, 80.0),
+        (100.0, 60.0, 10.0, 75.0),
+        (135.0, 135.0, 11.0, 92.0),
+        (65.0, 135.0, 12.0, 88.0),
+        (65.0, 65.0, 11.0, 82.0),
+        (135.0, 65.0, 12.0, 86.0),
+        (165.0, 145.0, 10.0, 70.0),
+        (35.0, 145.0, 9.0, 75.0),
+        (35.0, 55.0, 10.0, 68.0),
+        (165.0, 55.0, 9.0, 72.0),
+        (145.0, 165.0, 8.0, 65.0),
+        (55.0, 165.0, 8.0, 78.0),
+        (55.0, 35.0, 9.0, 60.0),
+        (145.0, 35.0, 8.0, 70.0),
+        (175.0, 100.0, 8.0, 55.0),
+        (100.0, 175.0, 8.0, 60.0),
+        (25.0, 100.0, 8.0, 50.0),
+        (100.0, 25.0, 8.0, 55.0),
+    ],
+    "chokepoint": [
+        (142.5, 112.0, 7.0, 90.0),  # East bottleneck (North flank)
+        (142.5, 88.0, 7.0, 90.0),   # East bottleneck (South flank)
+        (57.5, 112.0, 7.0, 90.0),   # West bottleneck (North flank)
+        (57.5, 88.0, 7.0, 90.0),    # West bottleneck (South flank)
+        (112.0, 142.5, 7.0, 90.0),  # North bottleneck (East flank)
+        (88.0, 142.5, 7.0, 90.0),   # North bottleneck (West flank)
+        (112.0, 57.5, 7.0, 90.0),   # South bottleneck (East flank)
+        (88.0, 57.5, 7.0, 90.0),    # South bottleneck (West flank)
+    ],
+    "canyon": [
+        (100.0, 60.0, 24.0, 90.0),
+        (100.0, 140.0, 24.0, 90.0),
+        (80.0, 100.0, 12.0, 80.0),
+    ],
+}
+
 @dataclass
 class AirspaceConfig:
+    preset_name: str = "benchmark"
     x_min: float = 0.0
     x_max: float = 200.0
     y_min: float = 0.0
     y_max: float = 200.0
-    z_min: float = 20.0
+    z_min: float = 0.0
     z_max: float = 100.0
     
-    # 4 Cylindrical obstacles situated directly IN BETWEEN initial UAV positions and mission stations
-    # (center_x, center_y, radius, height)
+    # Obstacle cylinders: (center_x, center_y, radius, height)
     obstacles: List[Tuple[float, float, float, float]] = field(default_factory=lambda: [
-        (142.5, 100.0, 10.0, 80.0),  # East corridor: directly in between (165, 100) and (120, 100)
-        (100.0, 142.5, 10.0, 85.0),  # North corridor: directly in between (100, 165) and (100, 120)
-        (57.5, 100.0, 10.0, 80.0),   # West corridor: directly in between (35, 100) and (80, 100)
-        (100.0, 57.5, 10.0, 75.0),   # South corridor: directly in between (100, 35) and (100, 80)
+        (142.5, 100.0, 10.0, 80.0),  # East corridor
+        (100.0, 142.5, 10.0, 85.0),  # North corridor
+        (57.5, 100.0, 10.0, 80.0),   # West corridor
+        (100.0, 57.5, 10.0, 75.0),   # South corridor
     ])
     
     # Mission center & Ground Edge Server location
@@ -41,6 +87,9 @@ class UAVPhysicsConfig:
     deadband_radius: float = 0.5   # Station-holding deadband (m)
     start_radius: float = 65.0     # Initial perimeter ring radius (m)
     station_radius: float = 20.0   # Designated mission station radius (m)
+    terminate_on_arrival: bool = False   # Terminate episode when all UAVs reach mission station
+    terminate_on_collision: bool = False # Terminate episode on genuine obstacle/peer collision
+    enable_safety_filter: bool = True    # Analytical safety filter enforcement toggle
     
     # Zeng et al. (2019) Rotary-Wing Aerodynamic Constants
     P_0: float = 79.86             # Blade profile power in hover (W)
@@ -66,6 +115,7 @@ class ComputationConfig:
     f_peer: float = 1.5e9          # Peer UAV CPU frequency (1.5 GHz)
     f_edge: float = 20.0e9         # Ground Edge Server CPU frequency (20 GHz)
     kappa: float = 1e-28           # Effective switched capacitance coefficient (J/(cycle * Hz^2))
+    edge_background_load: int = 2  # Background devices/tasks sharing Ground Edge Server capacity
 
 @dataclass
 class TaskConfig:
@@ -101,3 +151,13 @@ class MasterConfig:
     comp: ComputationConfig = field(default_factory=ComputationConfig)
     task: TaskConfig = field(default_factory=TaskConfig)
     mappo: MAPPOConfig = field(default_factory=MAPPOConfig)
+
+def get_preset_config(preset: str = "benchmark", num_uavs: int = 4) -> MasterConfig:
+    """Instantiates MasterConfig configured with a designated environment preset and fleet size."""
+    cfg = MasterConfig()
+    cfg.physics.num_uavs = num_uavs
+    cfg.airspace.preset_name = preset
+    if preset in ENV_PRESETS:
+        cfg.airspace.obstacles = list(ENV_PRESETS[preset])
+    return cfg
+

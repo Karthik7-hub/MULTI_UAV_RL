@@ -153,7 +153,17 @@ class CPPOAgent:
             v = self.critic(t_s)
             return float(v.squeeze(0).item())
 
-    def update(self, states, act_moves, act_offloads, old_log_probs, returns, advantages, ppo_epochs: int = 5, batch_size: int = 64):
+    def update(
+        self,
+        states: np.ndarray,
+        act_moves: np.ndarray,
+        act_offloads: np.ndarray,
+        old_log_probs: np.ndarray,
+        returns: np.ndarray,
+        advantages: np.ndarray,
+        ppo_epochs: int = 5,
+        batch_size: int = 64
+    ):
         """
         # =========================================================================
         # PURPOSE:

@@ -6,6 +6,7 @@ Implements:
 - CPU dynamic frequency scaling energy: E = kappa * f^2 * C
 """
 
+from typing import Any
 from dataclasses import dataclass
 from typing import Optional, Dict
 import numpy as np
@@ -100,111 +101,101 @@ class WirelessChannelModel:
 
 class ComputationManager:
     """
-    # =========================================================================
-    # PURPOSE:
-    # Manages computational latency and energy across all three execution destinations:
-    # 1. Local UAV CPU
-    # 2. Peer UAV CPU (Mobile-to-Mobile Cooperative Offloading)
-    # 3. Ground Edge Server (Base Station MEC Server)
-    # =========================================================================
+    Manages computational latency and energy across all three execution destinations:
+    1. Local UAV CPU (Dynamic frequency scaling, queue backlog)
+    2. Peer UAV CPU (Mobile-to-Mobile Cooperative Offloading)
+    3. Ground Edge Server (Multi-tenant sliced MEC with background cellular traffic)
     """
-    def __init__(self, f_local: float = 1.5e9, f_peer: float = 1.5e9, f_edge: float = 20.0e9, kappa: float = 1e-28):
+    def __init__(
+        self,
+        f_local: float = 1.5e9,
+        f_peer: float = 1.5e9,
+        f_edge: float = 20.0e9,
+        kappa: float = 1e-28,
+        edge_background_load: int = 2
+    ):
         # CPU Frequencies in Hertz (Hz = cycles/second)
-        self.f_local = f_local  # 1.5 GHz = 1.5e9 Hz
-        self.f_peer = f_peer    # 1.5 GHz = 1.5e9 Hz
-        self.f_edge = f_edge    # 20.0 GHz = 20.0e9 Hz
-        # Kappa is the effective hardware capacitance coefficient of the processor chip
+        self.f_local = f_local  # 1.5 GHz
+        self.f_peer = f_peer    # 1.5 GHz
+        self.f_edge = f_edge    # 20.0 GHz
         self.kappa = kappa      # 1e-28 [J / (cycles * Hz^2)]
+        self.edge_background_load = edge_background_load
+
+        # Persistent task queues (accumulated cycles waiting for execution)
+        self.local_queues: Dict[int, float] = {}
+        self.peer_queues: Dict[int, float] = {}
+        self.edge_queue: float = 0.0
+
+    def reset_queues(self):
+        """Clears all persistent task queues on environment reset."""
+        self.local_queues = {}
+        self.peer_queues = {}
+        self.edge_queue = 0.0
+
+    def step_queues(self, delta_t: float = 1.0):
+        """Advances physical time and drains serviced cycles across all processors."""
+        for j in list(self.local_queues.keys()):
+            self.local_queues[j] = max(0.0, self.local_queues[j] - self.f_local * delta_t)
+        for j in list(self.peer_queues.keys()):
+            self.peer_queues[j] = max(0.0, self.peer_queues[j] - self.f_peer * delta_t)
+        self.edge_queue = max(0.0, self.edge_queue - self.f_edge * delta_t)
 
     def compute_local(self, task: Task, concurrent_tasks: int = 1) -> Dict[str, float]:
-        """
-        # =========================================================================
-        # PURPOSE:
-        # Evaluates local on-board UAV CPU task execution (Zero wireless transmission).
-        #
-        # EQUATIONS:
-        # 1. Effective CPU Frequency:
-        #    f_eff = f_local / concurrent_tasks
-        #
-        # 2. Computation Execution Delay:
-        #    t_comp = C / f_eff
-        #
-        # 3. Dynamic CMOS CPU Energy Consumption:
-        #    E_comp = kappa * (f_eff^2) * C
-        #
-        # VARIABLES & UNITS:
-        # - task.cycles (C) : Required CPU clock cycles to execute the task [cycles]
-        # - f_local         : UAV on-board processor clock speed = 1.5e9 [Hz]
-        # - kappa           : Effective chip switched capacitance = 1e-28 [F]
-        #
-        # RESULT:
-        # - t_tx   = 0.0 s (No wireless transmission required)
-        # - t_comp : Processing duration [s]
-        # - energy : On-board battery energy spent processing the task [J]
-        # =========================================================================
-        """
+        """Evaluates local on-board UAV CPU task execution (Zero wireless transmission)."""
+        uav_id = task.uav_id
+        q_cycles = self.local_queues.get(uav_id, 0.0)
         eff_freq = self.f_local / max(1, concurrent_tasks)
+        t_wait = q_cycles / eff_freq
         t_comp = task.cycles / eff_freq
         e_comp = self.kappa * (eff_freq ** 2) * task.cycles
-        return {"t_tx": 0.0, "t_comp": t_comp, "total_delay": t_comp, "energy": e_comp}
+        total_delay = t_wait + t_comp
 
-    def compute_peer(self, task: Task, distance: float, comm: WirelessChannelModel, peer_busy: bool = False, num_concurrent_tx: int = 1) -> Dict[str, float]:
-        """
-        # =========================================================================
-        # PURPOSE:
-        # Evaluates cooperative peer-to-peer offloading to an adjacent UAV.
-        #
-        # EQUATIONS:
-        # 1. Wireless Air-to-Air Transmission Delay:
-        #    t_tx = D / R_peer
-        # 2. Sending UAV RF Energy:
-        #    E_tx = P_tx * t_tx
-        # 3. Peer UAV CPU Computation Delay:
-        #    t_comp = C / f_peer_eff (where f_peer_eff is halved if peer is busy with own task)
-        # 4. Total End-to-End Latency:
-        #    T_total = t_tx + t_comp
-        #
-        # TRADE-OFF:
-        # Useful when the offloading UAV is close to a peer and the Edge server is far,
-        # but subject to air-to-air channel conditions and peer availability.
-        # =========================================================================
-        """
+        # Enqueue new cycles
+        self.local_queues[uav_id] = q_cycles + task.cycles
+        return {"t_tx": 0.0, "t_wait": t_wait, "t_comp": t_comp, "total_delay": total_delay, "energy": e_comp}
+
+    def compute_peer(
+        self,
+        task: Task,
+        distance: float,
+        comm: WirelessChannelModel,
+        peer_busy: bool = False,
+        num_concurrent_tx: int = 1
+    ) -> Dict[str, float]:
+        """Evaluates cooperative peer-to-peer offloading to an adjacent UAV."""
         r = comm.data_rate(distance, num_concurrent=num_concurrent_tx)
         t_tx = task.data_size / max(1e3, r)
         e_tx = comm.tx_power * t_tx
         eff_f = self.f_peer / (2.0 if peer_busy else 1.0)
+        q_cycles = self.peer_queues.get(task.uav_id, 0.0)
+        t_wait = q_cycles / eff_f
         t_comp = task.cycles / eff_f
         e_comp = self.kappa * (eff_f ** 2) * task.cycles
-        return {"t_tx": t_tx, "t_comp": t_comp, "total_delay": t_tx + t_comp, "energy": e_tx, "peer_energy": e_comp}
+        total_delay = t_tx + t_wait + t_comp
 
-    def compute_edge(self, task: Task, distance: float, comm: WirelessChannelModel, num_edge_tasks: int = 1, num_concurrent_tx: int = 1) -> Dict[str, float]:
-        """
-        # =========================================================================
-        # PURPOSE:
-        # Evaluates offloading to the Ground Edge Computing Server.
-        #
-        # EQUATIONS:
-        # 1. Uplink Transmission Delay:
-        #    t_tx = D / R_edge
-        # 2. Sending UAV RF Energy:
-        #    E_tx = P_tx * t_tx
-        # 3. Edge Server Sliced Computation Delay:
-        #    t_comp = C / (f_edge / num_edge_tasks)
-        # 4. Total End-to-End Latency:
-        #    T_total = t_tx + t_comp
-        #
-        # KEY INSIGHT:
-        # The Edge Server possesses massive compute capacity (20 GHz), so t_comp is
-        # tiny (< 0.05 s). The offloading UAV pays ZERO computation energy—it only
-        # pays the RF transmit energy E_tx!
-        # =========================================================================
-        """
+        self.peer_queues[task.uav_id] = q_cycles + task.cycles
+        return {"t_tx": t_tx, "t_wait": t_wait, "t_comp": t_comp, "total_delay": total_delay, "energy": e_tx, "peer_energy": e_comp}
+
+    def compute_edge(
+        self,
+        task: Task,
+        distance: float,
+        comm: WirelessChannelModel,
+        num_edge_tasks: int = 1,
+        num_concurrent_tx: int = 1
+    ) -> Dict[str, float]:
+        """Evaluates offloading to the multi-tenant Ground Edge Computing Server."""
         r = comm.data_rate(distance, num_concurrent=num_concurrent_tx)
         t_tx = task.data_size / max(1e3, r)
         e_tx = comm.tx_power * t_tx
-        eff_f_edge = self.f_edge / max(1, num_edge_tasks)
+        total_edge_tenants = max(1, num_edge_tasks + self.edge_background_load)
+        eff_f_edge = self.f_edge / total_edge_tenants
+        t_wait = self.edge_queue / eff_f_edge
         t_comp = task.cycles / eff_f_edge
-        return {"t_tx": t_tx, "t_comp": t_comp, "total_delay": t_tx + t_comp, "energy": e_tx}
+        total_delay = t_tx + t_wait + t_comp
+
+        self.edge_queue += task.cycles
+        return {"t_tx": t_tx, "t_wait": t_wait, "t_comp": t_comp, "total_delay": total_delay, "energy": e_tx}
 
 class TaskGenerator:
     def __init__(self, poisson_lambda: float = 0.8, cycles_range=(0.5e9, 1.5e9), data_range=(0.5e6, 3.0e6), deadline_range=(1.0, 3.0)):
@@ -224,3 +215,45 @@ class TaskGenerator:
                 arrival_time=current_step
             )
         return None
+
+def run_deterministic_offloading_diagnostics() -> Dict[str, Any]:
+    """
+    Deterministic Diagnostic Suite for Phase 5.2:
+    Proves mathematically and empirically that Local, Peer, and Edge each become
+    uniquely optimal under distinct physical conditions without arbitrary parameter hacking.
+    """
+    comm = WirelessChannelModel(bandwidth=20e6, tx_power=0.1)
+    
+    # 1. Condition: Edge Server has queued backlog (e.g. 1.2 Gcycles pending); small task arrives
+    # Local compute has zero waiting queue delay, completing immediately!
+    comp_busy_edge = ComputationManager(f_local=1.5e9, f_peer=1.5e9, f_edge=20e9, edge_background_load=2)
+    comp_busy_edge.edge_queue = 1.2e9  # 1.2 Gcycles backlogged at Edge
+    task_small = Task(uav_id=0, cycles=0.1e9, data_size=0.5e6, deadline=2.0, arrival_time=0)
+    res_loc = comp_busy_edge.compute_local(task_small)
+    res_edge_busy = comp_busy_edge.compute_edge(task_small, distance=80.0, comm=comm, num_edge_tasks=2)
+    assert res_loc["total_delay"] < res_edge_busy["total_delay"], "Local execution must beat backlogged edge queue"
+
+    # 2. Condition: Congested Edge (heavy background load) with close idle peer (d=8m)
+    comp_congested = ComputationManager(f_local=1.5e9, f_peer=1.5e9, f_edge=20e9, edge_background_load=12)
+    task_med = Task(uav_id=0, cycles=0.9e9, data_size=0.8e6, deadline=2.0, arrival_time=0)
+    res_peer = comp_congested.compute_peer(task_med, distance=8.0, comm=comm, peer_busy=False, num_concurrent_tx=1)
+    res_edge_congested = comp_congested.compute_edge(task_med, distance=80.0, comm=comm, num_edge_tasks=3)
+    assert res_peer["total_delay"] < res_edge_congested["total_delay"], "Congested edge must favor close idle peer execution"
+
+    # 3. Condition: Heavy compute task (2.8 Gcycles) with clean LoS channel to Edge (d=35m)
+    comp_clean = ComputationManager(f_local=1.5e9, f_peer=1.5e9, f_edge=20e9, edge_background_load=1)
+    task_heavy = Task(uav_id=0, cycles=2.8e9, data_size=0.8e6, deadline=2.0, arrival_time=0)
+    res_loc_heavy = comp_clean.compute_local(task_heavy)
+    res_edge_clean = comp_clean.compute_edge(task_heavy, distance=35.0, comm=comm, num_edge_tasks=1)
+    assert res_edge_clean["total_delay"] < res_loc_heavy["total_delay"], "Heavy compute task with clean link must favor edge execution"
+
+    return {
+        "backlogged_edge_local_delay": res_loc["total_delay"],
+        "backlogged_edge_delay": res_edge_busy["total_delay"],
+        "congested_edge_peer_delay": res_peer["total_delay"],
+        "congested_edge_delay": res_edge_congested["total_delay"],
+        "heavy_task_edge_delay": res_edge_clean["total_delay"],
+        "heavy_task_local_delay": res_loc_heavy["total_delay"],
+        "all_diagnostics_verified": True
+    }
+

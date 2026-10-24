@@ -19,9 +19,17 @@ import numpy as np
 from typing import Dict, Tuple
 
 class MADDPGActor(nn.Module):
-    def __init__(self, obs_dim: int, num_offload_actions: int = 5, hidden_dim: int = 128, max_disp: float = 15.0):
+    def __init__(
+        self,
+        obs_dim: int,
+        num_offload_actions: int = 5,
+        hidden_dim: int = 128,
+        max_disp: float = 15.0,
+        policy_variant: str = "pure"  # "pure" or "residual"
+    ):
         super().__init__()
         self.max_disp = max_disp
+        self.policy_variant = policy_variant.lower()
         self.backbone = nn.Sequential(
             nn.Linear(obs_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
@@ -33,27 +41,46 @@ class MADDPGActor(nn.Module):
         self.move_head = nn.Linear(hidden_dim, 3)
         self.offload_head = nn.Linear(hidden_dim, num_offload_actions)
 
-    def forward(self, obs: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        feat = self.backbone(obs)
-
-        # Inductive goal attractor guidance toward designated station
+    def compute_nominal_apf_guidance(self, obs: torch.Tensor) -> torch.Tensor:
         station_vec = obs[:, 6:9]
         dist = torch.norm(station_vec, dim=-1, keepdim=True) * 200.0
         dir_to_station = station_vec / (torch.norm(station_vec, dim=-1, keepdim=True) + 1e-6)
-        # Suppress attractor velocity when close to station to enable stable hovering (prevents orbiting)
         guidance = dir_to_station * torch.clamp((dist - 3.5) / 10.0, 0.0, 1.0)
 
-        # Lateral obstacle avoidance prior using dynamic slice (independent of num_uavs)
         obs_vec_xy = obs[:, -3:-1]
         obs_dist = obs[:, -1:] * 50.0
         obs_dot = (dir_to_station[:, :2] * obs_vec_xy).sum(dim=-1, keepdim=True)
-        perp_xy = torch.stack([-obs_vec_xy[:, 1], obs_vec_xy[:, 0]], dim=-1)
-        avoid_weight = torch.clamp((25.0 - obs_dist) / 20.0, 0.0, 1.5) * torch.clamp(obs_dot, 0.0, 1.0)
+        
+        # 2D cross-product to detect whether obstacle is on left or right of flight path:
+        # cross > 0 means obstacle is to the LEFT -> steer RIGHT (-tangent)
+        # cross < 0 means obstacle is to the RIGHT -> steer LEFT (+tangent)
+        cross_2d = dir_to_station[:, 0:1] * obs_vec_xy[:, 1:2] - dir_to_station[:, 1:2] * obs_vec_xy[:, 0:1]
+        sign_turn = torch.where(cross_2d >= 0.0, -torch.ones_like(cross_2d), torch.ones_like(cross_2d))
+        tangent_xy = torch.stack([-obs_vec_xy[:, 1], obs_vec_xy[:, 0]], dim=-1) * sign_turn
 
-        combined_guidance = guidance.clone()
-        combined_guidance[:, :2] = combined_guidance[:, :2] + avoid_weight * perp_xy
+        avoid_weight = torch.clamp((25.0 - obs_dist) / 20.0, 0.0, 1.8) * torch.clamp(obs_dot, 0.0, 1.0)
+        avoid_vector = 1.0 * tangent_xy - 0.6 * obs_vec_xy
 
-        raw_move = self.move_head(feat) + 1.5 * combined_guidance
+        # Add vertical climbing component when obstacle directly blocks horizontal path
+        curr_alt = obs[:, 2:3] * 200.0
+        can_climb = torch.where(dir_to_station[:, 2:3] < -0.1, torch.zeros_like(curr_alt), torch.clamp((75.0 - curr_alt) / 20.0, 0.0, 1.0))
+        climb_z = torch.clamp((25.0 - obs_dist) / 20.0, 0.0, 1.0) * torch.clamp(obs_dot, 0.0, 1.0) * 0.8 * can_climb
+
+        combined = guidance.clone()
+        combined[:, :2] = combined[:, :2] + avoid_weight * avoid_vector
+        combined[:, 2:3] = combined[:, 2:3] + climb_z
+        return combined
+
+    def forward(self, obs: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        feat = self.backbone(obs)
+        learned_move = self.move_head(feat)
+
+        if self.policy_variant == "residual":
+            nominal_guidance = self.compute_nominal_apf_guidance(obs)
+            raw_move = learned_move + 1.5 * nominal_guidance
+        else:
+            raw_move = learned_move
+
         move = torch.tanh(raw_move) * self.max_disp
         offload_logits = self.offload_head(feat)
         return move, offload_logits
@@ -127,6 +154,7 @@ class MADDPGAgent:
         tau: float = 0.01,
         noise_std: float = 0.1,
         buffer_capacity: int = 50000,
+        policy_variant: str = "pure",
         device: str = "cpu"
     ):
         self.obs_dim = obs_dim
@@ -138,6 +166,7 @@ class MADDPGAgent:
         self.gamma = gamma
         self.tau = tau
         self.noise_std = noise_std
+        self.policy_variant = policy_variant.lower()
 
         from utils.device import DeviceManager
         if isinstance(device, str):
@@ -146,8 +175,8 @@ class MADDPGAgent:
             self.device = device
 
         # Actor and Critic + Targets
-        self.actor = MADDPGActor(obs_dim, num_offload_actions, hidden_dim).to(self.device)
-        self.actor_target = MADDPGActor(obs_dim, num_offload_actions, hidden_dim).to(self.device)
+        self.actor = MADDPGActor(obs_dim, num_offload_actions, hidden_dim, policy_variant=self.policy_variant).to(self.device)
+        self.actor_target = MADDPGActor(obs_dim, num_offload_actions, hidden_dim, policy_variant=self.policy_variant).to(self.device)
         self.actor_target.load_state_dict(self.actor.state_dict())
 
         self.critic = MADDPGCritic(state_dim, self.total_action_dim, hidden_dim).to(self.device)

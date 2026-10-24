@@ -18,6 +18,7 @@ virtualenv/
 
 # Experimental results, checkpoints, and logs (ignored for now as requested)
 results/
+results_baseline_backup/
 *.pt
 *.pth
 *.ckpt

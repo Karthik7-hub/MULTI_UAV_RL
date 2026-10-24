@@ -119,7 +119,15 @@ class MultiUAVEnv(gym.Env):
                     return False
         return True
 
-    def reset(self, seed: Optional[int] = None, scenario_mode: str = "default") -> Tuple[Dict[int, np.ndarray], np.ndarray]:
+    def _is_pos_outside_obstacles(self, p: np.ndarray, margin: float = 4.0) -> bool:
+        """Helper to verify coordinates are strictly outside all cylindrical obstacle volumes."""
+        for obs in self.cfg.airspace.obstacles:
+            cx, cy, r, h = obs[:4]
+            if np.linalg.norm(p[:2] - np.array([cx, cy])) < (r + margin) and p[2] <= (h + margin):
+                return False
+        return True
+
+    def reset(self, seed: Optional[int] = None, scenario_mode: str = "default", curriculum_ratio: float = 1.0) -> Tuple[Dict[int, np.ndarray], np.ndarray]:
         if seed is not None:
             self.rng = np.random.RandomState(seed)
         else:
@@ -127,31 +135,96 @@ class MultiUAVEnv(gym.Env):
 
         self.current_step = 0
         cx, cy, cz = self.cfg.airspace.mission_center
-        init_radius = self.cfg.physics.start_radius  # Initial deployment ring
+        nominal_start_radius = self.cfg.physics.start_radius  # Initial deployment ring (default 65m)
+        station_radius = self.cfg.physics.station_radius      # Station ring (20m)
+        
+        # Smooth curriculum interpolation:
+        curriculum_ratio = float(np.clip(curriculum_ratio, 0.0, 1.0))
+        init_radius = station_radius + curriculum_ratio * (nominal_start_radius - station_radius)
 
         self.positions = {}
         self.velocities = {}
-        for j in range(self.num_uavs):
-            angle = j * (2.0 * np.pi / self.num_uavs)
-            if scenario_mode == "randomized":
-                # Controlled perturbation for held-out evaluation scenarios
-                angle_offset = float(self.rng.uniform(-0.1, 0.1))
-                rad_offset = float(self.rng.uniform(-5.0, 5.0))
-                self.positions[j] = np.array([
-                    cx + (init_radius + rad_offset) * np.cos(angle + angle_offset),
-                    cy + (init_radius + rad_offset) * np.sin(angle + angle_offset),
-                    cz
-                ], dtype=np.float32)
-            else:
-                self.positions[j] = np.array([
-                    cx + init_radius * np.cos(angle),
-                    cy + init_radius * np.sin(angle),
-                    cz
-                ], dtype=np.float32)
-            self.velocities[j] = np.zeros(3, dtype=np.float32)
+        
+        # Determine whether to sample arbitrary long-range 3D navigation or rotated fleet
+        use_long_range = (scenario_mode in ["randomized", "nav_general"]) and (self.rng.uniform(0.0, 1.0) < 0.65)
+        
+        if use_long_range:
+            for j in range(self.num_uavs):
+                # Sample random start location across entire airspace
+                for _ in range(50):
+                    sp = np.array([
+                        float(self.rng.uniform(25.0, 175.0)),
+                        float(self.rng.uniform(25.0, 175.0)),
+                        float(self.rng.uniform(15.0, 60.0))
+                    ], dtype=np.float32)
+                    if self._is_pos_outside_obstacles(sp):
+                        self.positions[j] = sp
+                        break
+                else:
+                    self.positions[j] = np.array([30.0 + j * 25.0, 30.0, 20.0], dtype=np.float32)
+
+                # Sample random distant target location across airspace (distance >= 40m)
+                for _ in range(50):
+                    gp = np.array([
+                        float(self.rng.uniform(25.0, 175.0)),
+                        float(self.rng.uniform(25.0, 175.0)),
+                        float(self.rng.uniform(15.0, 60.0))
+                    ], dtype=np.float32)
+                    if float(np.linalg.norm(gp - self.positions[j])) >= 40.0 and self._is_pos_outside_obstacles(gp):
+                        self.stations[j] = gp
+                        break
+                else:
+                    self.stations[j] = np.array([170.0 - j * 25.0, 170.0, 25.0], dtype=np.float32)
+                self.velocities[j] = np.zeros(3, dtype=np.float32)
+        else:
+            rot = float(self.rng.uniform(0.0, 2.0 * np.pi)) if scenario_mode == "randomized" else 0.0
+            for j in range(self.num_uavs):
+                angle = j * (2.0 * np.pi / self.num_uavs) + rot
+                if scenario_mode == "randomized":
+                    angle_offset = float(self.rng.uniform(-0.15, 0.15))
+                    rad_offset = float(self.rng.uniform(-10.0, 10.0))
+                    z_offset = float(self.rng.uniform(-20.0, 20.0))
+                    self.positions[j] = np.array([
+                        cx + (init_radius + rad_offset) * np.cos(angle + angle_offset),
+                        cy + (init_radius + rad_offset) * np.sin(angle + angle_offset),
+                        float(np.clip(cz + z_offset, 20.0, 80.0))
+                    ], dtype=np.float32)
+                    self.stations[j] = np.array([
+                        cx + self.cfg.physics.station_radius * np.cos(angle),
+                        cy + self.cfg.physics.station_radius * np.sin(angle),
+                        cz
+                    ], dtype=np.float32)
+                else:
+                    self.positions[j] = np.array([
+                        cx + init_radius * np.cos(angle),
+                        cy + init_radius * np.sin(angle),
+                        cz
+                    ], dtype=np.float32)
+                    self.stations[j] = np.array([
+                        cx + self.cfg.physics.station_radius * np.cos(angle),
+                        cy + self.cfg.physics.station_radius * np.sin(angle),
+                        cz
+                    ], dtype=np.float32)
+                self.velocities[j] = np.zeros(3, dtype=np.float32)
 
         self.current_tasks = {j: self.task_gen.sample_task(j, self.current_step, self.rng) for j in range(self.num_uavs)}
         self._prev_d_stations = {j: float(np.linalg.norm(self.positions[j] - self.stations[j])) for j in range(self.num_uavs)}
+
+        # Phase 2: Disentangled Mission Protocol & Energy Tracking
+        self.arrival_steps = {j: None for j in range(self.num_uavs)}
+        self.arrival_times = {j: None for j in range(self.num_uavs)}
+        self.energy_to_goal = {j: 0.0 for j in range(self.num_uavs)}
+        self.path_length_to_goal = {j: 0.0 for j in range(self.num_uavs)}
+        self.service_energy = {j: 0.0 for j in range(self.num_uavs)}
+        self.total_path_length = {j: 0.0 for j in range(self.num_uavs)}
+        self.cumulative_prop_energy = {j: 0.0 for j in range(self.num_uavs)}
+        self.episode_proposed_collisions = 0
+        self.episode_interventions = 0
+        self.episode_actual_collisions = 0
+
+        # Reset persistent MEC computation queues
+        self.comp.reset_queues()
+
         return self._get_observations(), self._get_global_state()
 
     def step(self, actions: Dict[int, Dict[str, Any]]) -> Tuple[Dict[int, np.ndarray], np.ndarray, float, bool, Dict[str, Any]]:
@@ -194,36 +267,63 @@ class MultiUAVEnv(gym.Env):
         self.current_step += 1
         p_cfg = self.cfg.physics
 
+        # Advance persistent computation queues
+        self.comp.step_queues(p_cfg.delta_t)
+
         # ---------------------------------------------------------------------
         # 1. Kinematic Velocity and Displacement Integration
         # ---------------------------------------------------------------------
         proposed_pos = {}
         for j in range(self.num_uavs):
             disp = np.array(actions[j]["move"], dtype=np.float32)
-            disp_norm = np.linalg.norm(disp)
-            # Enforce physical maximum flight speed: max displacement per second is v_max * delta_t
-            if disp_norm > p_cfg.v_max * p_cfg.delta_t:
-                disp = disp * (p_cfg.v_max * p_cfg.delta_t / max(1e-6, disp_norm))
+            # Station-holding deadband: if UAV is within station deadband, hold stationary hover
+            if float(np.linalg.norm(self.positions[j] - self.stations[j])) <= p_cfg.deadband_radius:
+                disp = np.zeros(3, dtype=np.float32)
+            else:
+                disp_norm = np.linalg.norm(disp)
+                # Enforce physical maximum flight speed: max displacement per second is v_max * delta_t
+                if disp_norm > p_cfg.v_max * p_cfg.delta_t:
+                    disp = disp * (p_cfg.v_max * p_cfg.delta_t / max(1e-6, disp_norm))
             proposed_pos[j] = self.positions[j] + disp
 
         # ---------------------------------------------------------------------
-        # 2. Safety Projection Filter (Guarantees Collision-Free Trajectories)
+        # 2. Safety Projection Filter (Continuous Interception & Collision Tracking)
         # ---------------------------------------------------------------------
-        safe_pos, interventions = self.safety.filter_trajectories(proposed_pos, self.positions)
+        enable_filter = getattr(p_cfg, "enable_safety_filter", True)
+        safe_pos, interventions = self.safety.filter_trajectories(proposed_pos, self.positions, enable_filter=enable_filter)
+        safety_stats = self.safety.last_stats
+        self.episode_proposed_collisions += safety_stats["proposed_collisions"]
+        self.episode_interventions += safety_stats["interventions"]
+        self.episode_actual_collisions += safety_stats["actual_collisions"]
 
         # ---------------------------------------------------------------------
-        # 3. Update Speeds and Calculate Mechanical Propulsion Power
+        # 3. Update Speeds, Arrival States, and Aerodynamic Propulsion Power
         # ---------------------------------------------------------------------
         step_propulsion_energy = 0.0
         speeds = {}
         for j in range(self.num_uavs):
             actual_disp = safe_pos[j] - self.positions[j]
+            disp_dist = float(np.linalg.norm(actual_disp))
+            self.total_path_length[j] += disp_dist
             self.velocities[j] = actual_disp / p_cfg.delta_t
             speed = float(np.linalg.norm(self.velocities[j]))
             speeds[j] = speed
             self.positions[j] = safe_pos[j]
+
             # Accumulate aerodynamic propulsion energy E = P(v) * delta_t in Joules
-            step_propulsion_energy += self.aero.energy(speed, p_cfg.delta_t)
+            uav_e = self.aero.energy(speed, p_cfg.delta_t)
+            step_propulsion_energy += uav_e
+            self.cumulative_prop_energy[j] += uav_e
+
+            curr_d = float(np.linalg.norm(self.positions[j] - self.stations[j]))
+            if self.arrival_steps[j] is None:
+                self.energy_to_goal[j] += uav_e
+                self.path_length_to_goal[j] += disp_dist
+                if curr_d <= p_cfg.reach_tolerance:
+                    self.arrival_steps[j] = self.current_step
+                    self.arrival_times[j] = float(self.current_step * p_cfg.delta_t)
+            else:
+                self.service_energy[j] += uav_e
 
         # ---------------------------------------------------------------------
         # 4. Process Computation Tasks and Offloading Decisions with Multi-User Contention
@@ -291,64 +391,111 @@ class MultiUAVEnv(gym.Env):
         # 5. Composite Reward Function
         # ---------------------------------------------------------------------
         # EQUATION:
-        # R = R_task + R_deadline + R_energy + R_delay + R_safety + R_progress + R_station + R_loiter
+        # R = R_task + R_deadline + R_energy + R_delay + R_safety + R_progress + R_station + R_loiter + R_arrival + R_proximity
         #
         # DETAILED TERM BREAKDOWN:
-        # - R_task     = +2.0 * tasks_completed
+        # - R_task      = +2.0 * tasks_completed
         #   Encourages successfully finishing computational tasks before their deadline.
         #
-        # - R_deadline = -2.5 * deadline_misses
+        # - R_deadline  = -2.5 * deadline_misses
         #   Strict negative penalty for tasks whose delay exceeded task.deadline.
         #
-        # - R_energy   = -0.001 * total_step_energy
+        # - R_energy    = -0.001 * total_step_energy
         #   Penalizes total Joules spent (propulsion + RF comm + CPU computing).
         #   Scaled so ~500 J of energy produces an aligned reward penalty of -0.5.
         #
-        # - R_delay    = -1.0 * total_delay
+        # - R_delay     = -1.0 * total_delay
         #   Penalizes total latency across all tasks in seconds.
         #
-        # - R_safety   = -5.0 * interventions
+        # - R_safety    = -5.0 * interventions
         #   Heavy penalty whenever the analytical safety filter had to intervene.
         #   Prevents the policy from "riding the collision boundary" or depending on the filter.
         #
-        # - R_progress = +1.5 * sum(d_prev - d_curr) - 1.0 * sum(d_curr / 50.0)
+        # - R_progress  = +4.0 * sum(d_prev - d_curr) - 0.5 * sum(d_curr / 20.0)
         #   Potential-based navigation shaping: rewards closing the distance to the assigned station.
         #
-        # - R_station  = +3.0 (if d <= 5.0m) + 0.5 (if speed <= 1.0 m/s)
+        # - R_station   = +5.0 (if d <= 5.0m) + 2.0 (if speed <= 1.5 m/s)
         #   Rewards reaching and maintaining station-holding inside the reach tolerance.
         #
-        # - R_loiter   = -1.5 * (speed / v_max) (when d <= 5.0m and speed > 1.0 m/s)
+        # - R_loiter    = -2.0 * (speed / v_max) (when d <= 5.0m and speed > 1.5 m/s)
         #   Anti-loitering damping term: penalizes orbiting or circling at high speed around station.
+        #
+        # - R_arrival   = +80.0 milestone bonus on arrival + 30.0 fleet coordination bonus.
+        # - R_proximity = Continuous penalty & tangential guidance within 12m of obstacle surface.
         # ---------------------------------------------------------------------
         reward_task = 2.0 * tasks_completed
         reward_deadline = -2.5 * deadline_misses
         reward_energy = -0.001 * total_step_energy
         reward_delay = -1.0 * total_delay
-        reward_safety = -5.0 * interventions
+        reward_safety = -5.0 * min(6, interventions)
 
         reward_progress = 0.0
         reward_station = 0.0
         reward_loiter = 0.0
+        reward_arrival = 0.0
+        reward_proximity = 0.0
 
         uavs_on_station = 0
         for j in range(self.num_uavs):
             curr_d = float(np.linalg.norm(self.positions[j] - self.stations[j]))
             if hasattr(self, "_prev_d_stations") and j in self._prev_d_stations:
                 progress = self._prev_d_stations[j] - curr_d
-                reward_progress += 1.5 * progress
+                # Proportional progress shaping (reward moving closer, penalize retreating)
+                reward_progress += 4.0 * progress
+
+            # Goal Arrival Milestone Bonus: +80.0 awarded at the instant of arrival
+            if self.arrival_steps[j] is not None and self.arrival_steps[j] == self.current_step:
+                reward_arrival += 80.0
 
             if curr_d <= p_cfg.reach_tolerance:
                 uavs_on_station += 1
-                reward_station += 3.0  # Station keeping reward
+                reward_station += 5.0  # Station keeping reward
                 # Anti-loitering: penalize high residual velocity when at station
-                if speeds[j] > 1.0:
-                    reward_loiter -= 1.5 * (speeds[j] / p_cfg.v_max)
+                if speeds[j] > 1.5:
+                    reward_loiter -= 2.0 * (speeds[j] / p_cfg.v_max)
                 else:
-                    reward_station += 0.5  # Precision station holding bonus
+                    reward_station += 2.0  # Precision station holding bonus
             else:
-                reward_progress -= 1.0 * (curr_d / 50.0)
+                reward_progress -= 0.5 * (curr_d / 20.0)
 
-        reward = reward_task + reward_deadline + reward_energy + reward_delay + reward_safety + reward_progress + reward_station + reward_loiter
+            # Boundary proximity penalty: penalize approaching airspace walls (< 15m)
+            p_j = self.positions[j]
+            d_wall = min(
+                p_j[0] - self.cfg.airspace.x_min, self.cfg.airspace.x_max - p_j[0],
+                p_j[1] - self.cfg.airspace.y_min, self.cfg.airspace.y_max - p_j[1]
+            )
+            if d_wall < 15.0:
+                reward_safety -= 3.0 * (15.0 - max(0.0, d_wall)) / 15.0
+
+            # Smooth obstacle proximity penalty & tangential evasion guidance
+            for cx, cy, r, h in self.cfg.airspace.obstacles:
+                d_c = float(np.linalg.norm(self.positions[j][:2] - np.array([cx, cy])))
+                d_surf = d_c - r
+                if self.positions[j][2] <= h + 5.0 and d_surf < 12.0:
+                    reward_proximity -= 2.0 * (12.0 - max(0.0, d_surf)) / 12.0
+                    
+                    # Reward tangential velocity & vertical climb when obstacle blocks target
+                    obs_dir = (self.positions[j][:2] - np.array([cx, cy])) / max(1e-4, d_c)
+                    target_disp = self.stations[j][:2] - self.positions[j][:2]
+                    target_dist = float(np.linalg.norm(target_disp))
+                    if target_dist > 1e-4:
+                        target_dir = target_disp / target_dist
+                        # If moving towards the obstacle
+                        if float(np.dot(-obs_dir, target_dir)) > 0.2:
+                            perp_dir = np.array([-obs_dir[1], obs_dir[0]])
+                            v_tan = abs(float(np.dot(self.velocities[j][:2], perp_dir)))
+                            reward_progress += 1.2 * min(2.0, v_tan / 5.0)
+                            if self.positions[j][2] < h + 10.0 and self.velocities[j][2] > 0.5:
+                                reward_progress += 1.2 * min(2.0, self.velocities[j][2] / 5.0)
+
+        # Coordinated Fleet Mission Bonus when all UAVs reach designated stations
+        if all(self.arrival_steps[k] is not None for k in range(self.num_uavs)):
+            if any(self.arrival_steps[k] == self.current_step for k in range(self.num_uavs)):
+                reward_arrival += 30.0
+
+        reward = (reward_task + reward_deadline + reward_energy + reward_delay +
+                  reward_safety + reward_progress + reward_station + reward_loiter +
+                  reward_arrival + reward_proximity)
 
         # Cache distances for next step progress calculation
         self._prev_d_stations = {j: float(np.linalg.norm(self.positions[j] - self.stations[j])) for j in range(self.num_uavs)}
@@ -356,7 +503,20 @@ class MultiUAVEnv(gym.Env):
         # Generate new stochastic Poisson tasks for the next step
         self.current_tasks = {j: self.task_gen.sample_task(j, self.current_step, self.rng) for j in range(self.num_uavs)}
 
-        done = (self.current_step >= self.episode_length)
+        # Mission Termination Logic: Explicitly differentiate arrival, collision, and truncation
+        all_arrived = all(self.arrival_steps[j] is not None for j in range(self.num_uavs))
+        terminate_on_arrival = getattr(p_cfg, "terminate_on_arrival", False)
+        terminate_on_collision = getattr(p_cfg, "terminate_on_collision", False)
+
+        terminated = False
+        if terminate_on_arrival and all_arrived:
+            terminated = True
+        if terminate_on_collision and safety_stats["actual_collisions"] > 0:
+            terminated = True
+
+        truncated = (self.current_step >= self.episode_length)
+        done = terminated or truncated
+
         info = {
             "step_energy": total_step_energy,
             "propulsion_energy": step_propulsion_energy,
@@ -366,7 +526,20 @@ class MultiUAVEnv(gym.Env):
             "deadline_misses": deadline_misses,
             "total_delay": total_delay,
             "uavs_on_station": uavs_on_station,
+            "all_arrived": all_arrived,
+            "arrival_steps": dict(self.arrival_steps),
+            "arrival_times": dict(self.arrival_times),
+            "energy_to_goal": dict(self.energy_to_goal),
+            "fleet_energy_to_goal": float(sum(self.energy_to_goal.values())),
+            "path_length_to_goal": dict(self.path_length_to_goal),
+            "fleet_path_length_to_goal": float(sum(self.path_length_to_goal.values())),
+            "service_energy": dict(self.service_energy),
+            "fleet_service_energy": float(sum(self.service_energy.values())),
             "safety_interventions": interventions,
+            "proposed_collisions": safety_stats["proposed_collisions"],
+            "actual_collisions": safety_stats["actual_collisions"],
+            "terminated": terminated,
+            "truncated": truncated,
             "offload_edge": len(edge_offloaders),
             "offload_peer": len(peer_offloaders),
             "offload_local": len(local_executors),
@@ -378,7 +551,9 @@ class MultiUAVEnv(gym.Env):
                 "safety": reward_safety,
                 "progress": reward_progress,
                 "station": reward_station,
-                "loiter": reward_loiter
+                "loiter": reward_loiter,
+                "arrival": reward_arrival,
+                "proximity": reward_proximity
             }
         }
         return self._get_observations(), self._get_global_state(), reward, done, info

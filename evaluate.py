@@ -67,7 +67,10 @@ def evaluate_episode(env: MultiUAVEnv, model_key: str, agent: Any, seed: int = 1
     total_missed = 0
     total_delay = 0.0
     total_interventions = 0
+    total_proposed_collisions = 0
+    total_actual_collisions = 0
     offload_counts = {"local": 0, "peer": 0, "edge": 0}
+    last_info = {}
 
     if hasattr(agent, "reset"):
         agent.reset()
@@ -87,7 +90,7 @@ def evaluate_episode(env: MultiUAVEnv, model_key: str, agent: Any, seed: int = 1
             actions = agent.select_actions(obs)
         elif model_key == "cppo":
             actions, _, _, _ = agent.get_actions(state, deterministic=True)
-        elif model_key in ["mappo", "ippo"]:
+        elif model_key in ["mappo", "mappo_pure", "mappo_residual", "ippo"]:
             actions, _, _, _ = agent.get_actions(obs, deterministic=True)
         elif model_key == "maddpg":
             actions, _ = agent.get_actions(obs, explore=False)
@@ -95,6 +98,7 @@ def evaluate_episode(env: MultiUAVEnv, model_key: str, agent: Any, seed: int = 1
             raise ValueError(f"Unknown model_key: {model_key}")
 
         obs, state, _, done, info = env.step(actions)
+        last_info = info
         total_energy += info["step_energy"]
         total_prop_energy += info["propulsion_energy"]
         total_comm_energy += info.get("comm_energy", 0.0)
@@ -102,7 +106,9 @@ def evaluate_episode(env: MultiUAVEnv, model_key: str, agent: Any, seed: int = 1
         total_completed += info["tasks_completed"]
         total_missed += info["deadline_misses"]
         total_delay += info["total_delay"]
-        total_interventions += info["safety_interventions"]
+        total_interventions += info.get("safety_interventions", 0)
+        total_proposed_collisions += info.get("proposed_collisions", 0)
+        total_actual_collisions += info.get("actual_collisions", 0)
 
         offload_counts["edge"] += info.get("offload_edge", 0)
         offload_counts["peer"] += info.get("offload_peer", 0)
@@ -116,8 +122,19 @@ def evaluate_episode(env: MultiUAVEnv, model_key: str, agent: Any, seed: int = 1
     total_path = sum([np.sum(np.linalg.norm(np.diff(np.array(hist[j]["pos"]), axis=0), axis=1)) for j in range(num_uavs)])
     tot_decisions = max(1, offload_counts["local"] + offload_counts["peer"] + offload_counts["edge"])
 
+    fleet_energy_to_goal = float(last_info.get("fleet_energy_to_goal", total_energy))
+    fleet_service_energy = float(last_info.get("fleet_service_energy", 0.0))
+    fleet_path_to_goal = float(last_info.get("fleet_path_length_to_goal", total_path))
+    arrival_steps = last_info.get("arrival_steps", {})
+    arrivals = [arrival_steps.get(j) for j in range(num_uavs)]
+    successful_arrivals = sum(1 for a in arrivals if a is not None)
+    mission_success_rate = (successful_arrivals / num_uavs) * 100.0
+    mean_arrival_time = float(np.mean([a * cfg.physics.delta_t if a is not None else cfg.mappo.episode_length * cfg.physics.delta_t for a in arrivals]))
+
     hist["summary"] = {
         "total_energy": float(total_energy),
+        "fleet_energy_to_goal": float(fleet_energy_to_goal),
+        "fleet_service_energy": float(fleet_service_energy),
         "propulsion_energy": float(total_prop_energy),
         "comm_energy": float(total_comm_energy),
         "comp_energy": float(total_comp_energy),
@@ -128,7 +145,12 @@ def evaluate_episode(env: MultiUAVEnv, model_key: str, agent: Any, seed: int = 1
         "mean_delay_per_task": float(total_delay / total_tasks),
         "energy_per_task": float(total_energy / max(1, total_completed)),
         "total_path_length": float(total_path),
+        "fleet_path_to_goal": float(fleet_path_to_goal),
         "interventions": int(total_interventions),
+        "proposed_collisions": int(total_proposed_collisions),
+        "actual_collisions": int(total_actual_collisions),
+        "mission_success_rate": float(mission_success_rate),
+        "mean_arrival_time": float(mean_arrival_time),
         "pct_local": float((offload_counts["local"] / tot_decisions) * 100.0),
         "pct_peer": float((offload_counts["peer"] / tot_decisions) * 100.0),
         "pct_edge": float((offload_counts["edge"] / tot_decisions) * 100.0)
@@ -153,43 +175,56 @@ def run_evaluation(test_seeds: List[int] = [101, 102, 103, 104, 105], device: st
     # Initialize Agents
     agents = {}
 
-    # 1. MAPPO
-    mappo = MAPPOAgent(env.obs_dim, env.state_dim, num_uavs, num_uavs + 1, cfg.mappo.hidden_dim, device=dev)
-    for ckpt_candidate in [os.path.join(ckpt_dir, "best_mappo_agent.pt"), os.path.join(ckpt_dir, "final_mappo_agent.pt")]:
-        if os.path.exists(ckpt_candidate):
-            mappo.load_checkpoint(ckpt_candidate)
-            print(f"[Loaded] MAPPO checkpoint: {ckpt_candidate}")
+    # 1. Pure MAPPO (Variant A: No hardcoded APF in actor)
+    mappo_pure = MAPPOAgent(env.obs_dim, env.state_dim, num_uavs, num_uavs + 1, cfg.mappo.hidden_dim, policy_variant="pure", device=dev)
+    for ckpt in [os.path.join(ckpt_dir, "best_mappo_pure_agent.pt"), os.path.join(ckpt_dir, "final_mappo_pure_agent.pt"),
+                 os.path.join(ckpt_dir, "best_mappo_agent.pt"), os.path.join(ckpt_dir, "final_mappo_agent.pt")]:
+        if os.path.exists(ckpt):
+            mappo_pure.load_checkpoint(ckpt)
+            print(f"[Loaded] Pure MAPPO from {ckpt}")
             break
-    agents["mappo"] = mappo
+    agents["mappo_pure"] = mappo_pure
+    agents["mappo"] = mappo_pure  # Backward-compatible alias
 
-    # 2. IPPO
-    ippo = IPPOAgent(env.obs_dim, num_uavs, num_uavs + 1, cfg.mappo.hidden_dim, device=dev)
-    for ckpt_candidate in [os.path.join(ckpt_dir, "best_ippo_agent.pt"), os.path.join(ckpt_dir, "final_ippo_agent.pt")]:
-        if os.path.exists(ckpt_candidate):
-            ippo.load_checkpoint(ckpt_candidate)
-            print(f"[Loaded] IPPO checkpoint: {ckpt_candidate}")
+    # 2. APF-Assisted Residual MAPPO (Variant B: Nominal APF + learned residual)
+    mappo_residual = MAPPOAgent(env.obs_dim, env.state_dim, num_uavs, num_uavs + 1, cfg.mappo.hidden_dim, policy_variant="residual", device=dev)
+    for ckpt in [os.path.join(ckpt_dir, "best_mappo_residual_agent.pt"), os.path.join(ckpt_dir, "final_mappo_residual_agent.pt")]:
+        if os.path.exists(ckpt):
+            mappo_residual.load_checkpoint(ckpt)
+            print(f"[Loaded] Residual MAPPO from {ckpt}")
+            break
+    agents["mappo_residual"] = mappo_residual
+
+    # 3. IPPO
+    ippo = IPPOAgent(env.obs_dim, num_uavs, num_uavs + 1, cfg.mappo.hidden_dim, policy_variant="pure", device=dev)
+    for ckpt in [os.path.join(ckpt_dir, "best_ippo_pure_agent.pt"), os.path.join(ckpt_dir, "final_ippo_pure_agent.pt"),
+                 os.path.join(ckpt_dir, "best_ippo_agent.pt"), os.path.join(ckpt_dir, "final_ippo_agent.pt")]:
+        if os.path.exists(ckpt):
+            ippo.load_checkpoint(ckpt)
+            print(f"[Loaded] IPPO from {ckpt}")
             break
     agents["ippo"] = ippo
 
-    # 3. MADDPG
-    maddpg = MADDPGAgent(env.obs_dim, env.state_dim, num_uavs, num_uavs + 1, cfg.mappo.hidden_dim, device=dev)
-    for ckpt_candidate in [os.path.join(ckpt_dir, "best_maddpg_agent.pt"), os.path.join(ckpt_dir, "final_maddpg_agent.pt")]:
-        if os.path.exists(ckpt_candidate):
-            maddpg.load_checkpoint(ckpt_candidate)
-            print(f"[Loaded] MADDPG checkpoint: {ckpt_candidate}")
+    # 4. MADDPG
+    maddpg = MADDPGAgent(env.obs_dim, env.state_dim, num_uavs, num_uavs + 1, cfg.mappo.hidden_dim, policy_variant="pure", device=dev)
+    for ckpt in [os.path.join(ckpt_dir, "best_maddpg_pure_agent.pt"), os.path.join(ckpt_dir, "final_maddpg_pure_agent.pt"),
+                 os.path.join(ckpt_dir, "best_maddpg_agent.pt"), os.path.join(ckpt_dir, "final_maddpg_agent.pt")]:
+        if os.path.exists(ckpt):
+            maddpg.load_checkpoint(ckpt)
+            print(f"[Loaded] MADDPG from {ckpt}")
             break
     agents["maddpg"] = maddpg
 
-    # 4. CPPO
+    # 5. CPPO
     cppo = CPPOAgent(env.state_dim, num_uavs, num_uavs + 1, cfg.mappo.hidden_dim, device=dev)
-    for ckpt_candidate in [os.path.join(ckpt_dir, "best_cppo_agent.pt"), os.path.join(ckpt_dir, "final_cppo_agent.pt")]:
-        if os.path.exists(ckpt_candidate):
-            cppo.load_checkpoint(ckpt_candidate)
-            print(f"[Loaded] CPPO checkpoint: {ckpt_candidate}")
+    for ckpt in [os.path.join(ckpt_dir, "best_cppo_agent.pt"), os.path.join(ckpt_dir, "final_cppo_agent.pt")]:
+        if os.path.exists(ckpt):
+            cppo.load_checkpoint(ckpt)
+            print(f"[Loaded] CPPO from {ckpt}")
             break
     agents["cppo"] = cppo
 
-    # 5. Classical & Heuristic Baselines
+    # 6. Classical & Heuristic Baselines
     agents["astar_greedy"] = AStarJointBaseline(env, EnergyDeadlineAwareGreedyPolicy())
     agents["astar_latency"] = AStarJointBaseline(env, LowestLatencyPolicy())
     agents["local_only"] = AStarJointBaseline(env, LocalOnlyPolicy())
@@ -199,15 +234,16 @@ def run_evaluation(test_seeds: List[int] = [101, 102, 103, 104, 105], device: st
 
     # Model metadata for clean reporting
     methods_meta = [
-        ("3D A* + Energy-Deadline MEC (Proposed Classical)", "astar_greedy"),
+        ("3D A* + Energy-Deadline MEC (Classical Benchmark)", "astar_greedy"),
         ("3D A* + Lowest-Latency MEC", "astar_latency"),
         ("3D A* + Local-Only Execution", "local_only"),
         ("3D A* + Edge-Only Execution", "edge_only"),
-        ("3D A* + Random Feasible MEC (Lower Bound)", "random"),
+        ("3D A* + Random Feasible MEC", "random"),
         ("Centralized PPO (CPPO, CTCE)", "cppo"),
         ("Independent PPO (IPPO, DTDE)", "ippo"),
         ("Multi-Agent DDPG (MADDPG)", "maddpg"),
-        ("Proposed Joint MAPPO (CTDE)", "mappo")
+        ("Proposed Pure MAPPO (No APF Guidance)", "mappo_pure"),
+        ("APF-Assisted Residual MAPPO (Nominal+Residual)", "mappo_residual")
     ]
 
     print("\nRunning multi-seed held-out evaluations across", len(test_seeds), "test scenarios...")
@@ -235,13 +271,19 @@ def run_evaluation(test_seeds: List[int] = [101, 102, 103, 104, 105], device: st
         df_seeds = pd.DataFrame(seed_stats)
         aggregated_metrics[key] = {
             "Method": label,
+            "Success Rate (%)": f"{df_seeds['mission_success_rate'].mean():.1f} ± {df_seeds['mission_success_rate'].std():.1f}",
+            "Arrival Time (s)": f"{df_seeds['mean_arrival_time'].mean():.1f} ± {df_seeds['mean_arrival_time'].std():.1f}",
+            "Nav Energy (kJ)": f"{df_seeds['fleet_energy_to_goal'].mean()/1000.0:.1f} ± {df_seeds['fleet_energy_to_goal'].std()/1000.0:.1f}",
+            "Service Energy (kJ)": f"{df_seeds['fleet_service_energy'].mean()/1000.0:.1f} ± {df_seeds['fleet_service_energy'].std()/1000.0:.1f}",
+            "Total Energy (kJ)": f"{df_seeds['total_energy'].mean()/1000.0:.1f} ± {df_seeds['total_energy'].std()/1000.0:.1f}",
             "Completion Rate (%)": f"{df_seeds['completion_rate'].mean():.1f} ± {df_seeds['completion_rate'].std():.1f}",
             "Total Delay (s)": f"{df_seeds['total_delay'].mean():.1f} ± {df_seeds['total_delay'].std():.1f}",
-            "Total Energy (kJ)": f"{df_seeds['total_energy'].mean()/1000.0:.1f} ± {df_seeds['total_energy'].std()/1000.0:.1f}",
             "Energy / Task (J)": f"{df_seeds['energy_per_task'].mean():.1f} ± {df_seeds['energy_per_task'].std():.1f}",
             "Path Length (m)": f"{df_seeds['total_path_length'].mean():.1f} ± {df_seeds['total_path_length'].std():.1f}",
             "Safety Interventions": f"{df_seeds['interventions'].mean():.1f} ± {df_seeds['interventions'].std():.1f}",
+            "Actual Collisions": f"{df_seeds['actual_collisions'].mean():.1f} ± {df_seeds['actual_collisions'].std():.1f}",
             "Raw_Total_Energy_J": float(df_seeds['total_energy'].mean()),
+            "Raw_Nav_Energy_J": float(df_seeds['fleet_energy_to_goal'].mean()),
             "Raw_Total_Delay_s": float(df_seeds['total_delay'].mean()),
             "Pct_Local": float(df_seeds['pct_local'].mean()),
             "Pct_Peer": float(df_seeds['pct_peer'].mean()),
@@ -257,12 +299,16 @@ def run_evaluation(test_seeds: List[int] = [101, 102, 103, 104, 105], device: st
         m = aggregated_metrics[key]
         summary_rows.append({
             "Method": m["Method"],
-            "Completion Rate (%)": m["Completion Rate (%)"],
-            "Total Delay (s)": m["Total Delay (s)"],
+            "Success (%)": m["Success Rate (%)"],
+            "Arrival (s)": m["Arrival Time (s)"],
+            "Nav Energy (kJ)": m["Nav Energy (kJ)"],
+            "Service Energy (kJ)": m["Service Energy (kJ)"],
             "Total Energy (kJ)": m["Total Energy (kJ)"],
-            "Energy / Task (J)": m["Energy / Task (J)"],
+            "Tasks Done (%)": m["Completion Rate (%)"],
+            "Delay (s)": m["Total Delay (s)"],
             "Path Length (m)": m["Path Length (m)"],
-            "Safety Interventions": m["Safety Interventions"]
+            "Interventions": m["Safety Interventions"],
+            "Collisions": m["Actual Collisions"]
         })
         offload_rows.append({
             "Method": label,
@@ -298,6 +344,9 @@ def run_evaluation(test_seeds: List[int] = [101, 102, 103, 104, 105], device: st
     print(f"[Saved] Detailed records: {detailed_csv}")
 
     # Generate Publication Figures
+    if "mappo" not in first_seed_results:
+        first_seed_results["mappo"] = first_seed_results.get("mappo_residual", first_seed_results.get("mappo_pure"))
+
     diag_path = os.path.join(fig_dir, "trajectory_diagnostic_comparison.png")
     plot_trajectory_diagnostic(
         astar_data=first_seed_results["astar_greedy"],

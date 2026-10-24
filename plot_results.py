@@ -122,7 +122,7 @@ def regenerate_all_figures():
     traj_csv = os.path.join(res_dir, "trajectory_records.csv")
     nav_csv = os.path.join(res_dir, "navigation_benchmark.csv")
     if os.path.exists(traj_csv) and os.path.exists(nav_csv):
-        from plots.plot_trajectory_comparison import plot_publication_3d_trajectory_benchmark
+        from plots.render_publication_figures import plot_publication_3d_trajectory_benchmark
         df_traj = pd.read_csv(traj_csv)
         df_nav = pd.read_csv(nav_csv)
         cfg = MasterConfig()

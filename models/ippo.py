@@ -10,7 +10,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import numpy as np
-from typing import Dict
+from typing import Dict, Optional, Any, Tuple
 
 from models.mappo import ActorNetwork, RolloutBuffer
 
@@ -42,6 +42,7 @@ class IPPOAgent:
         clip_eps: float = 0.2,
         entropy_coef: float = 0.01,
         max_grad_norm: float = 0.5,
+        policy_variant: str = "pure",
         device: str = "cpu"
     ):
         self.obs_dim = obs_dim
@@ -49,6 +50,7 @@ class IPPOAgent:
         self.clip_eps = clip_eps
         self.entropy_coef = entropy_coef
         self.max_grad_norm = max_grad_norm
+        self.policy_variant = policy_variant.lower()
 
         from utils.device import DeviceManager
         if isinstance(device, str):
@@ -57,7 +59,12 @@ class IPPOAgent:
             self.device = device
 
         # Decentralized Actor (parameter-shared or individual)
-        self.actor = ActorNetwork(obs_dim, num_offload_actions, hidden_dim).to(self.device)
+        self.actor = ActorNetwork(
+            obs_dim=obs_dim,
+            num_offload_actions=num_offload_actions,
+            hidden_dim=hidden_dim,
+            policy_variant=self.policy_variant
+        ).to(self.device)
         # Decentralized Local Critic: observes ONLY local observation o_j
         self.critic = LocalCriticNetwork(obs_dim, hidden_dim).to(self.device)
 
@@ -96,7 +103,17 @@ class IPPOAgent:
                 vals.append(float(v.squeeze(0).item()))
             return float(np.mean(vals))
 
-    def update(self, buffer: RolloutBuffer, ppo_epochs: int = 5, batch_size: int = 64, gamma: float = 0.99, gae_lambda: float = 0.95):
+    def update(
+        self,
+        buffer: RolloutBuffer,
+        next_obs: Optional[Dict[int, np.ndarray]] = None,
+        next_state: Optional[np.ndarray] = None,
+        last_terminated: bool = False,
+        ppo_epochs: int = 5,
+        batch_size: int = 64,
+        gamma: float = 0.99,
+        gae_lambda: float = 0.95
+    ):
         """
         # =========================================================================
         # PURPOSE:
@@ -110,8 +127,11 @@ class IPPOAgent:
         # =========================================================================
         """
         # Calculate advantages using mean local value estimates
-        last_val = self.get_value({j: buffer.obs_buf[-1, j] for j in range(self.num_uavs)})
-        adv, ret = buffer.compute_gae(last_val, gamma, gae_lambda)
+        if next_obs is not None:
+            last_val = self.get_value(next_obs)
+        else:
+            last_val = self.get_value({j: buffer.obs_buf[-1, j] for j in range(self.num_uavs)})
+        adv, ret = buffer.compute_gae(last_val, last_terminated=last_terminated, gamma=gamma, gae_lambda=gae_lambda)
         adv = (adv - adv.mean()) / (adv.std() + 1e-8)
 
         t_obs = torch.tensor(buffer.obs_buf, dtype=torch.float32, device=self.device).view(-1, self.obs_dim)

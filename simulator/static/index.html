@@ -1,0 +1,399 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AEROPLAN 3D — UAV Path-Planning &amp; Policy Inspector</title>
+    <!-- Professional Typography: Inter & JetBrains Mono -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <!-- FontAwesome Line Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <!-- Clean Minimal Stylesheet -->
+    <link rel="stylesheet" href="/css/style.css">
+    <!-- Three.js & OrbitControls -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+</head>
+<body>
+    <div id="canvas-container"></div>
+
+    <!-- TOP NAVIGATION BAR -->
+    <header class="top-nav">
+        <div class="nav-brand">
+            <span class="brand-title">AEROPLAN 3D</span>
+            <span class="brand-subtitle">Autonomous UAV Trajectory &amp; Policy Inspector</span>
+        </div>
+
+        <div class="nav-badges">
+            <div class="status-badge" id="backend-status">
+                <span class="status-dot online"></span>
+                <span class="badge-label">Backend:</span>
+                <span class="badge-value">Connected</span>
+            </div>
+            <div class="status-badge select-badge">
+                <i class="fa-solid fa-cube"></i>
+                <select id="preset-selector" class="badge-select" title="Scenario Preset">
+                    <option value="benchmark">Scenario: Benchmark Cylinders</option>
+                    <option value="metropolis">Scenario: Metropolis Skyscraper City (20 Towers)</option>
+                    <option value="chokepoint">Scenario: Canyon Chokepoint (Narrow Pass)</option>
+                    <option value="canyon">Scenario: Urban Canyon</option>
+                    <option value="maze">Scenario: Dense Maze</option>
+                    <option value="spheres">Scenario: Mixed Spheres &amp; Cylinders</option>
+                    <option value="empty">Scenario: Open Airspace</option>
+                </select>
+            </div>
+            <div class="status-badge" id="nav-planner-badge">
+                <i class="fa-solid fa-route"></i>
+                <span id="badge-planner-name">Planner: Hierarchical A* + MAPPO</span>
+            </div>
+            <div class="status-badge" id="nav-status-badge">
+                <i class="fa-solid fa-circle-check"></i>
+                <span id="badge-mission-status">Status: Ready</span>
+            </div>
+        </div>
+
+        <div class="nav-view-actions">
+            <div class="segmented-control">
+                <button class="view-btn" id="btn-camera-top" title="Top-Down Orthographic View">Top</button>
+                <button class="view-btn" id="btn-camera-side" title="Side Elevation View">Side</button>
+                <button class="view-btn active" id="btn-camera-reset" title="Isometric 3D View">3D</button>
+            </div>
+            <button class="view-btn benchmark-btn" id="btn-open-compare" title="Run Matched Multi-Algorithm Benchmark">
+                <i class="fa-solid fa-table-list"></i> Benchmark
+            </button>
+        </div>
+    </header>
+
+    <!-- MAIN INTERFACE BODY (3 COLUMNS) -->
+    <div class="main-layout">
+        <!-- LEFT PANEL: WORLD CONFIGURATION -->
+        <aside class="panel left-panel" id="world-editor-panel">
+            <div class="panel-header">
+                <h2>World Configuration</h2>
+                <span class="panel-header-badge">200 × 200 × 100 m</span>
+            </div>
+
+            <div class="panel-content">
+                <!-- Environment Bounds -->
+                <div class="section-group">
+                    <div class="section-header">Airspace Bounds</div>
+                    <div class="field-row">
+                        <span class="field-label">X Domain</span>
+                        <div class="range-inputs">
+                            <input type="number" id="env-x-min" class="num-input" value="0" readonly>
+                            <span class="dash">to</span>
+                            <input type="number" id="env-x-max" class="num-input" value="200" readonly>
+                            <span class="unit-tag">m</span>
+                        </div>
+                    </div>
+                    <div class="field-row">
+                        <span class="field-label">Y Domain</span>
+                        <div class="range-inputs">
+                            <input type="number" id="env-y-min" class="num-input" value="0" readonly>
+                            <span class="dash">to</span>
+                            <input type="number" id="env-y-max" class="num-input" value="200" readonly>
+                            <span class="unit-tag">m</span>
+                        </div>
+                    </div>
+                    <div class="field-row">
+                        <span class="field-label">Z Altitude</span>
+                        <div class="range-inputs">
+                            <input type="number" id="env-z-min" class="num-input" value="0" readonly>
+                            <span class="dash">to</span>
+                            <input type="number" id="env-z-max" class="num-input" value="100" readonly>
+                            <span class="unit-tag">m</span>
+                        </div>
+                    </div>
+                    <div class="field-row">
+                        <span class="field-label">Voxel Resolution</span>
+                        <div class="range-inputs">
+                            <input type="number" id="env-grid-size" class="num-input single" value="5" min="2" max="10" step="1">
+                            <span class="unit-tag">m</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Mission Endpoints -->
+                <div class="section-group">
+                    <div class="section-header">Mission Endpoints</div>
+                    <div class="endpoint-row">
+                        <span class="field-label"><span class="marker-dot-start"></span>Origin S</span>
+                        <div class="coord-triplet">
+                            <input type="number" id="src-x" class="num-input coord" value="20" step="5" title="X (m)">
+                            <input type="number" id="src-y" class="num-input coord" value="20" step="5" title="Y (m)">
+                            <input type="number" id="src-z" class="num-input coord" value="10" step="5" title="Z (m)">
+                        </div>
+                    </div>
+                    <div class="endpoint-row">
+                        <span class="field-label"><span class="marker-dot-goal"></span>Target G</span>
+                        <div class="coord-triplet">
+                            <input type="number" id="tgt-x" class="num-input coord" value="180" step="5" title="X (m)">
+                            <input type="number" id="tgt-y" class="num-input coord" value="180" step="5" title="Y (m)">
+                            <input type="number" id="tgt-z" class="num-input coord" value="10" step="5" title="Z (m)">
+                        </div>
+                    </div>
+                    <button class="btn btn-secondary w-100 mt-2" id="btn-update-endpoints">
+                        <i class="fa-solid fa-arrows-rotate"></i> Apply Coordinates
+                    </button>
+                </div>
+
+                <!-- Obstacles Section -->
+                <div class="section-group flex-grow">
+                    <div class="section-header-row">
+                        <div class="section-header">Obstacle Catalog</div>
+                        <div class="header-actions">
+                            <button class="btn-action-sm" id="btn-add-cylinder" title="Add Cylindrical Obstacle">+ Cylinder</button>
+                            <button class="btn-action-sm" id="btn-add-sphere" title="Add Spherical Obstacle">+ Sphere</button>
+                        </div>
+                    </div>
+                    <div class="obstacle-list" id="obstacle-list-container">
+                        <!-- Populated dynamically via app.js -->
+                    </div>
+                </div>
+            </div>
+        </aside>
+
+        <!-- CENTER SPACER (3D Canvas lies beneath) -->
+        <main class="center-spacer" id="viewport-overlay">
+            <!-- Dynamic 3D Coordinates Overlay Labels (X, Y, Z ticks generated by Three.js) -->
+        </main>
+
+        <!-- RIGHT PANEL: DECISION INSPECTOR -->
+        <aside class="panel right-panel" id="decision-inspector-panel">
+            <div class="panel-header">
+                <h2>Decision Inspector</h2>
+            </div>
+
+            <div class="panel-content">
+                <!-- UAV Telemetry (2x2 Grid) -->
+                <div class="section-group">
+                    <div class="section-header">UAV Telemetry</div>
+                    <div class="telemetry-2x2">
+                        <div class="telemetry-box">
+                            <div class="telem-label">Position (m)</div>
+                            <div class="telem-value" id="telem-pos">(20.0, 20.0, 30.0)</div>
+                        </div>
+                        <div class="telemetry-box">
+                            <div class="telem-label">Speed (m/s)</div>
+                            <div class="telem-value" id="telem-speed">0.0</div>
+                        </div>
+                        <div class="telemetry-box">
+                            <div class="telem-label">Distance to Goal (m)</div>
+                            <div class="telem-value" id="telem-goal-dist">226.3</div>
+                        </div>
+                        <div class="telemetry-box">
+                            <div class="telem-label">Nearest Obstacle (m)</div>
+                            <div class="telem-value" id="telem-clearance">45.2</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Input Observation Vector (Unit Normalized) -->
+                <div class="section-group">
+                    <div class="section-header">Observation Vector (Unit Normalized)</div>
+                    <div class="obs-item">
+                        <div class="obs-label">Target Direction</div>
+                        <div class="obs-value mono" id="obs-target-rel">[+0.71, +0.71, 0.00]</div>
+                    </div>
+                    <div class="obs-item">
+                        <div class="obs-label">Relative Velocity</div>
+                        <div class="obs-value mono" id="obs-vel-rel">[0.00, 0.00, 0.00]</div>
+                    </div>
+                    <div class="obs-item">
+                        <div class="obs-label">Nearest Obstacle Vector</div>
+                        <div class="obs-value mono" id="obs-obs-rel">[+0.42, +0.91, 0.00]</div>
+                    </div>
+                </div>
+
+                <!-- Selected Action -->
+                <div class="section-group">
+                    <div class="section-header">Selected Action</div>
+                    <div class="action-item">
+                        <div class="action-label">Action (Δv)</div>
+                        <div class="action-value mono" id="act-delta-v">[+0.00, +0.00, +0.00]</div>
+                    </div>
+                    <div class="action-item">
+                        <div class="action-label">Speed Command (m/s)</div>
+                        <div class="action-value mono" id="act-speed-cmd">0.0</div>
+                    </div>
+                </div>
+
+                <!-- Planner Info -->
+                <div class="section-group">
+                    <div class="section-header">Planner Info</div>
+                    <div class="info-table">
+                        <div class="info-row">
+                            <span class="info-key">Planner</span>
+                            <span class="info-val" id="info-planner-name">APF-Assisted MAPPO</span>
+                        </div>
+                        <div class="info-row">
+                            <span class="info-key">Step</span>
+                            <span class="info-val mono" id="info-step-count">0 / 100</span>
+                        </div>
+                        <div class="info-row">
+                            <span class="info-key">Safety Filter</span>
+                            <span class="info-val" id="info-safety-status">Not Active</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Decision Explanation Subviews -->
+                <div class="section-group" id="decision-explanation-group">
+                    <div class="section-header" id="decision-explanation-title">Decision Explanation</div>
+                    <!-- A* Subview -->
+                    <div id="inspector-astar-view" class="explanation-details">
+                        <div class="math-cost-row">
+                            <span class="math-term">g(n): <b id="astar-g">0.0</b></span>
+                            <span class="math-term">+ h(n): <b id="astar-h">226.3</b></span>
+                            <span class="math-term">= f(n): <b id="astar-f" class="primary-text">226.3</b></span>
+                        </div>
+                        <div class="explanation-desc" id="astar-decision-note">
+                            Deterministic graph search priority: candidate voxel with lowest estimated total path cost.
+                        </div>
+                    </div>
+
+                    <!-- Neural Policy Subview -->
+                    <div id="inspector-rl-view" class="explanation-details" style="display: none;">
+                        <div class="rl-breakdown-row" id="row-apf-nom">
+                            <span class="rl-lbl">Nominal APF Prior:</span>
+                            <span class="rl-val mono" id="val-apf-nom">[+4.2, +4.2, 0.0]</span>
+                        </div>
+                        <div class="rl-breakdown-row">
+                            <span class="rl-lbl">Learned Neural Action:</span>
+                            <span class="rl-val mono" id="val-neural-out">[+5.1, +4.8, 0.0]</span>
+                        </div>
+                        <div class="rl-breakdown-row">
+                            <span class="rl-lbl">Effective Command (u):</span>
+                            <span class="rl-val mono" id="val-effective-cmd">[+5.0, +5.0, 0.0]</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Multi-Planner Comparative Inspector (Visible in Compare Mode) -->
+                <div id="inspector-compare-view" style="display: none;">
+                    <div class="section-group">
+                        <div class="section-header">Active Trajectory Layers</div>
+                        <div class="comp-check-list">
+                            <label class="comp-check-item">
+                                <input type="checkbox" id="chk-algo-hybrid" checked data-algo="hybrid_astar_mappo">
+                                <span class="comp-color-dot" style="background: #1D4ED8;"></span>
+                                <span class="comp-algo-name">Hierarchical A* + MAPPO</span>
+                                <span class="badge-ours">Ours</span>
+                            </label>
+                            <label class="comp-check-item">
+                                <input type="checkbox" id="chk-algo-astar" checked data-algo="astar">
+                                <span class="comp-color-dot" style="background: #DC2626;"></span>
+                                <span class="comp-algo-name">3D A* Baseline</span>
+                            </label>
+                            <label class="comp-check-item">
+                                <input type="checkbox" id="chk-algo-residual" checked data-algo="mappo_residual">
+                                <span class="comp-color-dot" style="background: #D97706;"></span>
+                                <span class="comp-algo-name">APF-Residual MAPPO</span>
+                            </label>
+                            <label class="comp-check-item">
+                                <input type="checkbox" id="chk-algo-pure" checked data-algo="mappo_pure">
+                                <span class="comp-color-dot" style="background: #8B5CF6;"></span>
+                                <span class="comp-algo-name">Pure MAPPO Policy</span>
+                            </label>
+                        </div>
+                    </div>
+
+                    <div class="section-group">
+                        <div class="section-header">Comparative Telemetry</div>
+                        <div id="compare-cards-container">
+                            <!-- Populated dynamically via app.js -->
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </aside>
+    </div>
+
+    <!-- BOTTOM SIMULATION CONTROL BAR -->
+    <footer class="bottom-control-bar">
+        <div class="control-left">
+            <span class="control-label">Planner</span>
+            <select id="planner-selector" class="control-select">
+                <option value="hybrid_astar_mappo">Hierarchical A* + MAPPO (Proposed)</option>
+                <option value="astar">3D A* + Pure Pursuit Baseline</option>
+                <option value="mappo_residual">APF-Residual MAPPO</option>
+                <option value="mappo_pure">Pure MAPPO Policy</option>
+                <option value="compare_all">Batch Comparison (Simultaneous)</option>
+            </select>
+            <button class="btn btn-plan-fly" id="btn-plan-run">
+                <i class="fa-solid fa-play"></i> Plan &amp; Fly
+            </button>
+            <button class="btn btn-compare-mode" id="btn-compare-all" title="Run and display all planners simultaneously">
+                <i class="fa-solid fa-layer-group"></i> Compare All
+            </button>
+            <div class="sim-btn-group">
+                <button class="btn-playback" id="btn-play-pause" title="Pause / Resume Flight"><i class="fa-solid fa-pause"></i></button>
+                <button class="btn-playback" id="btn-stop-sim" title="Stop Flight"><i class="fa-solid fa-square"></i></button>
+                <button class="btn-playback" id="btn-reset-sim" title="Reset Flight to Start"><i class="fa-solid fa-rotate-left"></i></button>
+            </div>
+        </div>
+
+        <div class="control-center">
+            <span class="step-label" id="step-counter">Simulation Step: 0 / 0</span>
+            <input type="range" id="timeline-slider" min="0" max="100" value="0" class="step-slider">
+        </div>
+
+        <div class="control-right">
+            <label class="toggle-checkbox">
+                <input type="checkbox" id="chk-show-path" checked>
+                <span>Planned Path</span>
+            </label>
+            <label class="toggle-checkbox">
+                <input type="checkbox" id="chk-show-explored" checked>
+                <span>Explored Nodes</span>
+            </label>
+            <label class="toggle-checkbox">
+                <input type="checkbox" id="chk-show-halos">
+                <span>Safety Halos</span>
+            </label>
+        </div>
+    </footer>
+
+    <!-- COMPARISON MODAL DIALOG -->
+    <div class="modal-backdrop" id="compare-modal" style="display: none;">
+        <div class="modal-window">
+            <div class="modal-header">
+                <h3>Matched Research Benchmark Evaluation</h3>
+                <button class="btn-close" id="btn-close-modal"><i class="fa-solid fa-xmark"></i></button>
+            </div>
+            <div class="modal-body">
+                <p class="modal-subtitle">
+                    Strictly matched side-by-side performance evaluation on the identical active 3D obstacle layout.
+                </p>
+                <div class="table-wrapper">
+                    <table class="benchmark-data-table" id="modal-benchmark-table">
+                        <thead>
+                            <tr>
+                                <th>Algorithm</th>
+                                <th>Status</th>
+                                <th>Path Length (m)</th>
+                                <th>Steps</th>
+                                <th>Planning Time (ms)</th>
+                                <th>Min Clearance (m)</th>
+                                <th>Safety Interventions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="modal-table-body">
+                            <!-- Populated dynamically via JS -->
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" id="btn-export-json"><i class="fa-solid fa-download"></i> Export JSON</button>
+                <button class="btn btn-primary" id="btn-run-all-benchmarks"><i class="fa-solid fa-play"></i> Re-Run All Planners</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Application JavaScript Engine -->
+    <script src="/js/app.js"></script>
+</body>
+</html>

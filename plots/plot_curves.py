@@ -686,49 +686,115 @@ def plot_offload_distribution_stacked(offload_data: dict, save_path: str):
 
 def plot_pareto_latency_energy(results_dict: dict, save_path: str):
     """
-    Plots Latency vs Energy Pareto trade-off curve with labeled points and convex frontier.
+    Plots Latency vs Energy Multi-Objective Pareto Trade-Off Curve.
+    Strictly adheres to IEEE Transactions on Wireless Communications / Robotics standards:
+    - Standard column sizing (6.2 x 4.5 inches)
+    - Serif typography (DejaVu Serif / Times New Roman)
+    - Empirical Pareto-optimal non-dominated frontier curve
+    - Distinct, colorblind-friendly geometric markers and colors
+    - Clean compact IEEE legend in upper right
+    - Saves both high-res 300 DPI PNG and vector PDF
     """
-    fig, ax = plt.subplots(figsize=(10, 6.5), dpi=300)
+    plt.rcParams.update({
+        "font.family": "serif",
+        "font.serif": ["DejaVu Serif", "Times New Roman", "Computer Modern Roman"],
+        "mathtext.fontset": "cm",
+        "axes.edgecolor": "#333333",
+        "axes.linewidth": 0.8,
+        "grid.linewidth": 0.5,
+        "grid.alpha": 0.5,
+        "grid.color": "#CBD5E1",
+    })
+
+    fig, ax = plt.subplots(figsize=(6.4, 4.6), dpi=300)
+
+    # Standard IEEE publication color palette
     colors = {
-        "mappo": "#0284c7",
-        "cppo": "#0ea5e9",
-        "ippo": "#059669",
-        "maddpg": "#8b5cf6",
-        "astar_greedy": "#dc2626",
-        "astar_latency": "#e11d48",
-        "local_only": "#64748b",
-        "edge_only": "#f59e0b",
-        "random": "#94a3b8"
+        "mappo_residual": "#1D4ED8",  # Royal Blue
+        "mappo_pure": "#0284C7",      # Cyan Blue
+        "mappo": "#1D4ED8",
+        "cppo": "#0D9488",            # Teal
+        "ippo": "#059669",            # Emerald
+        "maddpg": "#7C3AED",          # Purple
+        "astar_greedy": "#DC2626",    # Red
+        "astar_latency": "#EA580C",   # Orange
+        "local_only": "#64748B",      # Slate
+        "edge_only": "#D97706",       # Amber
+        "random": "#94A3B8"           # Gray
     }
 
     markers = {
-        "mappo": "o", "cppo": "v", "ippo": "s", "maddpg": "^",
-        "astar_greedy": "D", "astar_latency": "P", "local_only": "X",
-        "edge_only": "*", "random": "."
+        "mappo_residual": "*",
+        "mappo_pure": "o",
+        "mappo": "*",
+        "cppo": "s",
+        "ippo": "^",
+        "maddpg": "D",
+        "astar_greedy": "v",
+        "astar_latency": "P",
+        "local_only": "X",
+        "edge_only": "p",
+        "random": "h"
     }
 
+    # Extract evaluated points
     pts = []
     for k, v in results_dict.items():
-        lat = v["latency"]
-        ene_kj = v["energy"] / 1000.0
+        lat = float(v.get("latency", 0.0))
+        ene_kj = float(v.get("energy", 0.0)) / 1000.0
+        lbl = v.get("label", k)
         c = colors.get(k, "#334155")
         m = markers.get(k, "o")
-        lbl = v.get("label", k)
-        ax.scatter(lat, ene_kj, color=c, s=140, marker=m, zorder=5, label=lbl, edgecolors='black', linewidth=1.0)
-        pts.append((lat, ene_kj, lbl))
-        ax.annotate(lbl, (lat, ene_kj), textcoords="offset points", xytext=(8, 4), fontsize=9, fontweight='bold', color=c)
+        s = 110 if m in ["*", "D"] else 70
+        pts.append({"key": k, "lat": lat, "ene": ene_kj, "lbl": lbl, "color": c, "marker": m, "size": s})
 
-    ax.set_xlabel("Mean Total Latency (seconds)", fontsize=11)
-    ax.set_ylabel("Fleet Total Energy Consumption (kJ)", fontsize=11)
-    ax.set_title("Figure 7: Multi-Objective Pareto Trade-Off: Task Latency vs Fleet Energy", fontsize=12, fontweight='bold')
-    ax.grid(True, linestyle=':', alpha=0.6)
-    ax.legend(loc='upper right', framealpha=0.9, fontsize=9)
+    # Compute Pareto frontier (minimizing both latency and energy)
+    sorted_pts = sorted(pts, key=lambda p: p["lat"])
+    frontier = []
+    min_ene = float("inf")
+    for p in sorted_pts:
+        if p["ene"] < min_ene:
+            frontier.append(p)
+            min_ene = p["ene"]
+
+    # Draw Pareto-optimal frontier line
+    if len(frontier) >= 2:
+        fx = [p["lat"] for p in frontier]
+        fy = [p["ene"] for p in frontier]
+        ax.plot(fx, fy, linestyle="--", color="#1E3A8A", linewidth=1.4, alpha=0.85, zorder=3,
+                label=r"Pareto Frontier $\mathcal{P}^*$")
+
+    # Plot policy scatter points
+    for p in pts:
+        ax.scatter(p["lat"], p["ene"], color=p["color"], s=p["size"], marker=p["marker"],
+                   edgecolors="#0F172A", linewidth=0.7, zorder=5, label=p["lbl"])
+
+    # Clean axes styling
+    ax.set_xlabel(r"Mean Fleet Task Latency $T_{\mathrm{delay}}$ (s)", fontsize=10, labelpad=6)
+    ax.set_ylabel(r"Fleet Cumulative Energy $E_{\mathrm{fleet}}$ (kJ)", fontsize=10, labelpad=6)
+    ax.set_title(r"Multi-Objective Pareto Trade-Off: Task Latency vs. Fleet Energy",
+                 fontsize=11, fontweight="bold", pad=8)
+    ax.grid(True, linestyle=":", alpha=0.55)
+
+    # Clean IEEE Legend inside upper right
+    ax.legend(
+        loc="upper right",
+        frameon=True,
+        framealpha=0.92,
+        edgecolor="#CBD5E1",
+        fontsize=8.0,
+        ncol=1
+    )
 
     plt.tight_layout()
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
-    plt.savefig(save_path, dpi=300)
+    plt.savefig(save_path, dpi=300, bbox_inches="tight")
+
+    # Vector PDF export
+    pdf_path = os.path.splitext(save_path)[0] + ".pdf"
+    plt.savefig(pdf_path, format="pdf", bbox_inches="tight")
     plt.close()
-    print(f"[Plotter] Saved Pareto trade-off figure: {save_path}")
+    print(f"[Plotter] Saved clean IEEE Pareto trade-off figure:\n  -> {save_path}\n  -> {pdf_path}")
 
 def plot_ablation_comparison(ablation_dict: dict, save_path: str):
     """
@@ -830,4 +896,97 @@ def plot_3d_flight_trajectories(eval_results: dict, obstacles: list, stations: d
     plt.savefig(save_path, dpi=300)
     plt.close()
     print(f"[Plotter] Saved 3D flight trajectories figure: {save_path}")
+
+def plot_all_marl_training_convergence(csv_dict: dict, save_path: str):
+    """
+    Plots multi-algorithm MARL training convergence comparison (MAPPO vs IPPO vs MADDPG vs CPPO):
+    - (a) Episode Return
+    - (b) Task Completion Rate (%)
+    - (c) Fleet Energy Consumption (kJ)
+    - (d) Validation Score / Stability
+    """
+    fig, axes = plt.subplots(2, 2, figsize=(15, 11), dpi=300)
+    palette = {
+        "mappo": {"name": "Proposed Joint MAPPO (CTDE)", "color": "#0284c7", "ls": "-", "lw": 2.5},
+        "ippo": {"name": "Independent PPO (DTDE)", "color": "#059669", "ls": "-.", "lw": 2.0},
+        "maddpg": {"name": "Multi-Agent DDPG (Off-Policy)", "color": "#8b5cf6", "ls": ":", "lw": 2.0},
+        "cppo": {"name": "Centralized PPO (CTCE Upper Bound)", "color": "#dc2626", "ls": "--", "lw": 2.0}
+    }
+
+    loaded_any = False
+    for key, path in csv_dict.items():
+        if not os.path.exists(path):
+            continue
+        try:
+            df = pd.read_csv(path)
+            if len(df) == 0:
+                continue
+            loaded_any = True
+            cfg = palette.get(key, {"name": key.upper(), "color": "#334155", "ls": "-", "lw": 1.8})
+            w = max(3, len(df) // 10)
+
+            # (a) Episode Return
+            ax1 = axes[0, 0]
+            smooth_ret = df["return"].rolling(w, min_periods=1).mean()
+            ax1.plot(df["episode"], smooth_ret, color=cfg["color"], linestyle=cfg["ls"], linewidth=cfg["lw"], label=cfg["name"])
+
+            # (b) Task Completion Rate
+            ax2 = axes[0, 1]
+            comp = (df["completed_tasks"] / np.maximum(1, df["completed_tasks"] + df["deadline_misses"])) * 100.0
+            smooth_comp = comp.rolling(w, min_periods=1).mean()
+            ax2.plot(df["episode"], smooth_comp, color=cfg["color"], linestyle=cfg["ls"], linewidth=cfg["lw"], label=cfg["name"])
+
+            # (c) Fleet Energy (kJ)
+            ax3 = axes[1, 0]
+            energy_kj = df["total_energy"] / 1000.0
+            smooth_e = energy_kj.rolling(w, min_periods=1).mean()
+            ax3.plot(df["episode"], smooth_e, color=cfg["color"], linestyle=cfg["ls"], linewidth=cfg["lw"], label=cfg["name"])
+
+            # (d) Validation Score
+            ax4 = axes[1, 1]
+            if "val_return" in df.columns and df["val_return"].notna().sum() > 0:
+                valid_val = df.dropna(subset=["val_return"])
+                ax4.plot(valid_val["episode"], valid_val["val_return"], color=cfg["color"], linestyle=cfg["ls"], linewidth=cfg["lw"], marker="o", markersize=4, label=cfg["name"])
+        except Exception as e:
+            print(f"[Plotter] Warning: Failed to process {path}: {e}")
+
+    if not loaded_any:
+        print("[Plotter] Warning: No training logs found for multi-algorithm plot.")
+        plt.close()
+        return
+
+    axes[0, 0].set_title("(a) Cumulative Episode Return vs Episode", fontsize=11, fontweight="bold")
+    axes[0, 0].set_xlabel("Training Episode", fontsize=10)
+    axes[0, 0].set_ylabel("Episode Return", fontsize=10)
+    axes[0, 0].grid(True, linestyle=":", alpha=0.6)
+    axes[0, 0].legend(loc="lower right", fontsize=8.5, framealpha=0.9)
+
+    axes[0, 1].set_title("(b) Task Completion Rate (%) vs Episode", fontsize=11, fontweight="bold")
+    axes[0, 1].set_xlabel("Training Episode", fontsize=10)
+    axes[0, 1].set_ylabel("Completion Rate (%)", fontsize=10)
+    axes[0, 1].set_ylim(0, 105)
+    axes[0, 1].grid(True, linestyle=":", alpha=0.6)
+    axes[0, 1].legend(loc="lower right", fontsize=8.5, framealpha=0.9)
+
+    axes[1, 0].set_title("(c) Fleet Mechanical & Comm Energy (kJ) vs Episode", fontsize=11, fontweight="bold")
+    axes[1, 0].set_xlabel("Training Episode", fontsize=10)
+    axes[1, 0].set_ylabel("Total Energy (kJ)", fontsize=10)
+    axes[1, 0].grid(True, linestyle=":", alpha=0.6)
+    axes[1, 0].legend(loc="upper right", fontsize=8.5, framealpha=0.9)
+
+    axes[1, 1].set_title("(d) Held-Out Validation Return vs Episode", fontsize=11, fontweight="bold")
+    axes[1, 1].set_xlabel("Training Episode", fontsize=10)
+    axes[1, 1].set_ylabel("Validation Return", fontsize=10)
+    axes[1, 1].grid(True, linestyle=":", alpha=0.6)
+    axes[1, 1].legend(loc="lower right", fontsize=8.5, framealpha=0.9)
+
+    plt.suptitle("Multi-Agent Reinforcement Learning Training Convergence Comparison", fontsize=12, fontweight="bold", y=0.98)
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    plt.savefig(save_path, dpi=300, bbox_inches="tight")
+    pdf_path = os.path.splitext(save_path)[0] + ".pdf"
+    plt.savefig(pdf_path, format="pdf", bbox_inches="tight")
+    plt.close()
+    print(f"[Plotter] Saved MARL training convergence figure:\n  -> {save_path}\n  -> {pdf_path}")
+
 

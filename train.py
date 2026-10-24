@@ -29,17 +29,28 @@ from models.ippo import IPPOAgent
 from models.maddpg import MADDPGAgent
 from models.cppo import CPPOAgent
 from models.baselines import EnergyDeadlineAwareGreedyPolicy
-from plots.plot_curves import plot_training_convergence, plot_aerodynamic_power_curve
+from plots.plot_curves import (
+    plot_training_convergence,
+    plot_aerodynamic_power_curve,
+    plot_all_marl_training_convergence
+)
 
-def evaluate_validation(env: MultiUAVEnv, agent: Any, model_type: str, val_seeds: List[int] = [1001, 1002, 1003]) -> Dict[str, float]:
-    """Evaluates agent deterministically on held-out validation scenarios."""
+try:
+    from tqdm import tqdm
+except ImportError:
+    def tqdm(iterable, *args, **kwargs):
+        return iterable
+
+def evaluate_validation(env: MultiUAVEnv, agent: Any, model_type: str, val_seeds: List[int] = [1001, 1002, 1003, 1004]) -> Dict[str, float]:
+    """Evaluates agent deterministically on held-out randomized 3D validation scenarios."""
     val_returns = []
     val_comp_rates = []
     val_energies = []
     val_interventions = []
+    val_arrivals = []
 
     for s in val_seeds:
-        obs, state = env.reset(seed=s)
+        obs, state = env.reset(seed=s, scenario_mode="randomized")
         ep_ret = 0.0
         ep_comp = 0
         ep_miss = 0
@@ -70,27 +81,37 @@ def evaluate_validation(env: MultiUAVEnv, agent: Any, model_type: str, val_seeds
         val_comp_rates.append((ep_comp / total_tasks) * 100.0)
         val_energies.append(ep_energy)
         val_interventions.append(ep_interv)
+        arr_cnt = sum(1 for a in info.get("arrival_steps", {}).values() if a is not None)
+        val_arrivals.append((arr_cnt / env.num_uavs) * 100.0)
 
+    avg_arrival = float(np.mean(val_arrivals))
+    avg_ret = float(np.mean(val_returns))
+    avg_interv = float(np.mean(val_interventions))
+    val_score = avg_arrival * 10.0 + 0.1 * avg_ret - 2.0 * avg_interv
     return {
-        "val_return": float(np.mean(val_returns)),
+        "val_return": avg_ret,
         "val_comp_rate": float(np.mean(val_comp_rates)),
         "val_energy": float(np.mean(val_energies)),
-        "val_interventions": float(np.mean(val_interventions))
+        "val_interventions": avg_interv,
+        "val_arrival_rate": avg_arrival,
+        "val_score": val_score
     }
 
 def train_mappo(
     num_episodes: int = 80,
     seed: int = 42,
     device: str = "auto",
+    policy_variant: str = "pure",
     ablation: Optional[str] = None,
     eval_freq: int = 10,
-    save_tag: Optional[str] = None
+    save_tag: Optional[str] = None,
+    curriculum: bool = False
 ) -> str:
     dev = DeviceManager.select_device(device)
-    tag = save_tag or (f"mappo_{ablation}" if ablation else "mappo")
+    tag = save_tag or (f"mappo_{policy_variant}_{ablation}" if ablation else f"mappo_{policy_variant}")
     DeviceManager.print_diagnostics(
         dev, seed=seed,
-        extra_config={"Algorithm": "Proposed Joint MAPPO", "Ablation": str(ablation), "Episodes": num_episodes}
+        extra_config={"Algorithm": "Proposed Joint MAPPO", "Variant": policy_variant, "Ablation": str(ablation), "Episodes": num_episodes, "Curriculum": curriculum}
     )
 
     cfg = MasterConfig()
@@ -109,6 +130,7 @@ def train_mappo(
         entropy_coef=cfg.mappo.entropy_coef,
         value_coef=cfg.mappo.value_loss_coef,
         max_grad_norm=cfg.mappo.max_grad_norm,
+        policy_variant=policy_variant,
         device=dev
     )
 
@@ -136,7 +158,9 @@ def train_mappo(
     config_dict = {
         "model": tag,
         "algorithm": "MAPPO",
+        "policy_variant": policy_variant,
         "ablation": ablation,
+        "curriculum": curriculum,
         "seed": seed,
         "device": dev.type,
         "num_episodes": num_episodes,
@@ -153,15 +177,25 @@ def train_mappo(
     with open(config_json_path, "w") as f:
         json.dump(config_dict, f, indent=4)
 
-    best_val_return = -float("inf")
+    best_val_score = -float("inf")
     metrics = []
     total_env_time = 0.0
     total_update_time = 0.0
     start_total_time = time.time()
 
-    for ep in range(1, num_episodes + 1):
+    pbar = tqdm(range(1, num_episodes + 1), desc=f"[{tag.upper()}]", unit="ep", ncols=115, dynamic_ncols=True)
+    for ep in pbar:
         t_env_start = time.time()
-        obs, state = env.reset(seed=seed + ep)
+        if curriculum:
+            if ep <= int(num_episodes * 0.20):
+                c_ratio = 0.25
+            elif ep <= int(num_episodes * 0.50):
+                c_ratio = 0.65
+            else:
+                c_ratio = 1.0
+        else:
+            c_ratio = 1.0
+        obs, state = env.reset(seed=seed + ep, scenario_mode="randomized", curriculum_ratio=c_ratio)
         buffer.step_idx = 0
 
         ep_reward = 0.0
@@ -169,6 +203,8 @@ def train_mappo(
         ep_missed = 0
         ep_energy = 0.0
         ep_interventions = 0
+        last_terminated = False
+        next_state = state
 
         for t in range(cfg.mappo.episode_length):
             actions, act_move, act_offload, log_probs = agent.get_actions(obs, deterministic=False)
@@ -180,6 +216,7 @@ def train_mappo(
 
             val = agent.get_value(state)
             next_obs, next_state, r, done, info = env.step(actions)
+            last_terminated = bool(info.get("terminated", False))
 
             # Ablations on reward shaping
             if ablation == "no_energy":
@@ -187,7 +224,7 @@ def train_mappo(
             elif ablation == "no_safety":
                 r -= info["reward_components"]["safety"]  # Remove safety penalty
 
-            buffer.insert(obs, state, act_move, act_offload, log_probs, r, val, done)
+            buffer.insert(obs, state, act_move, act_offload, log_probs, r, val, done, terminated=last_terminated)
 
             obs = next_obs
             state = next_state
@@ -205,6 +242,8 @@ def train_mappo(
         t_up_start = time.time()
         agent.update(
             buffer,
+            next_state=next_state,
+            last_terminated=last_terminated,
             ppo_epochs=cfg.mappo.ppo_epochs,
             batch_size=cfg.mappo.batch_size,
             gamma=cfg.mappo.gamma,
@@ -216,11 +255,11 @@ def train_mappo(
         comp_rate = (ep_completed / total_tasks) * 100.0
 
         # Periodic Validation on held-out seeds
-        val_stats = {"val_return": np.nan, "val_comp_rate": np.nan, "val_energy": np.nan, "val_interventions": np.nan}
-        if ep % eval_freq == 0 or ep == 1:
+        val_stats = {"val_return": np.nan, "val_comp_rate": np.nan, "val_energy": np.nan, "val_interventions": np.nan, "val_arrival_rate": np.nan, "val_score": np.nan}
+        if ep % eval_freq == 0:
             val_stats = evaluate_validation(env, agent, "mappo")
-            if val_stats["val_return"] > best_val_return:
-                best_val_return = val_stats["val_return"]
+            if ep >= 10 and val_stats["val_score"] > best_val_score:
+                best_val_score = val_stats["val_score"]
                 agent.save_checkpoint(best_ckpt_path)
 
         cum_env_steps = ep * cfg.mappo.episode_length
@@ -244,14 +283,31 @@ def train_mappo(
             "wall_clock_sec": time.time() - start_total_time
         })
 
+        pbar.set_postfix({
+            "Ret": f"{ep_reward:6.1f}",
+            "Done": f"{comp_rate:4.1f}%",
+            "Energy": f"{ep_energy/1000.0:4.1f}kJ",
+            "Steps/s": f"{env_steps_per_sec:.0f}"
+        })
+
         if ep % 10 == 0 or ep == 1:
             val_str = f"ValRet: {val_stats['val_return']:6.1f} | " if not np.isnan(val_stats["val_return"]) else ""
-            print(f"[{tag.upper()}] Ep {ep:3d}/{num_episodes} | Return: {ep_reward:7.2f} | {val_str}Done: {ep_completed:3d} ({comp_rate:5.1f}%) | Energy: {ep_energy/1000.0:6.1f} kJ | Safety: {ep_interventions} | Steps/s: {env_steps_per_sec:.0f}")
+            pbar.write(f"[{tag.upper()}] Ep {ep:3d}/{num_episodes} | Return: {ep_reward:7.2f} | {val_str}Done: {ep_completed:3d} ({comp_rate:5.1f}%) | Energy: {ep_energy/1000.0:6.1f} kJ | Safety: {ep_interventions} | Steps/s: {env_steps_per_sec:.0f}")
 
     agent.save_checkpoint(final_ckpt_path)
+
+    # Save backwards-compatible alias if pure variant
+    if policy_variant == "pure" and not ablation:
+        compat_path = os.path.join(ckpt_dir, "best_mappo_agent.pt")
+        compat_final = os.path.join(ckpt_dir, "final_mappo_agent.pt")
+        import shutil
+        if os.path.exists(best_ckpt_path):
+            shutil.copyfile(best_ckpt_path, compat_path)
+        shutil.copyfile(final_ckpt_path, compat_final)
+
     df_metrics = pd.DataFrame(metrics)
     df_metrics.to_csv(csv_log_path, index=False)
-    if tag == "mappo":
+    if tag in ["mappo", "mappo_pure"]:
         df_metrics.to_csv(os.path.join(res_dir, "training_logs.csv"), index=False)
         plot_training_convergence(csv_log_path, os.path.join(fig_dir, "training_convergence_curves.png"))
         plot_aerodynamic_power_curve(env.aero, os.path.join(fig_dir, "aerodynamic_power_curve.png"))
@@ -259,9 +315,9 @@ def train_mappo(
     print(f"[{tag.upper()} Finished] Best Checkpoint: {best_ckpt_path} | Final: {final_ckpt_path} | Log: {csv_log_path}")
     return best_ckpt_path
 
-def train_ippo(num_episodes: int = 80, seed: int = 42, device: str = "auto", eval_freq: int = 10) -> str:
+def train_ippo(num_episodes: int = 80, seed: int = 42, device: str = "auto", policy_variant: str = "pure", eval_freq: int = 10) -> str:
     dev = DeviceManager.select_device(device)
-    DeviceManager.print_diagnostics(dev, seed=seed, extra_config={"Algorithm": "Independent PPO (IPPO)", "Episodes": num_episodes})
+    DeviceManager.print_diagnostics(dev, seed=seed, extra_config={"Algorithm": "Independent PPO (IPPO)", "Variant": policy_variant, "Episodes": num_episodes})
 
     cfg = MasterConfig()
     cfg.mappo.num_episodes = num_episodes
@@ -277,6 +333,7 @@ def train_ippo(num_episodes: int = 80, seed: int = 42, device: str = "auto", eva
         clip_eps=cfg.mappo.clip_epsilon,
         entropy_coef=cfg.mappo.entropy_coef,
         max_grad_norm=cfg.mappo.max_grad_norm,
+        policy_variant=policy_variant,
         device=dev
     )
 
@@ -290,9 +347,9 @@ def train_ippo(num_episodes: int = 80, seed: int = 42, device: str = "auto", eva
     base_dir = os.path.dirname(os.path.abspath(__file__))
     res_dir = os.path.join(base_dir, "results")
     ckpt_dir = os.path.join(res_dir, "checkpoints")
-    best_ckpt = os.path.join(ckpt_dir, "best_ippo_agent.pt")
-    final_ckpt = os.path.join(ckpt_dir, "final_ippo_agent.pt")
-    csv_log = os.path.join(res_dir, "training_logs_ippo.csv")
+    best_ckpt = os.path.join(ckpt_dir, f"best_ippo_{policy_variant}_agent.pt")
+    final_ckpt = os.path.join(ckpt_dir, f"final_ippo_{policy_variant}_agent.pt")
+    csv_log = os.path.join(res_dir, f"training_logs_ippo_{policy_variant}.csv")
 
     best_val_return = -float("inf")
     metrics = []
@@ -300,7 +357,8 @@ def train_ippo(num_episodes: int = 80, seed: int = 42, device: str = "auto", eva
     total_update_time = 0.0
     start_total_time = time.time()
 
-    for ep in range(1, num_episodes + 1):
+    pbar = tqdm(range(1, num_episodes + 1), desc="[IPPO]", unit="ep", ncols=115, dynamic_ncols=True)
+    for ep in pbar:
         t_env_start = time.time()
         obs, state = env.reset(seed=seed + ep)
         buffer.step_idx = 0
@@ -310,13 +368,17 @@ def train_ippo(num_episodes: int = 80, seed: int = 42, device: str = "auto", eva
         ep_missed = 0
         ep_energy = 0.0
         ep_interventions = 0
+        last_terminated = False
+        next_state = state
+        next_obs = obs
 
         for t in range(cfg.mappo.episode_length):
             actions, act_move, act_offload, log_probs = agent.get_actions(obs, deterministic=False)
             val = agent.get_value(obs)
 
             next_obs, next_state, r, done, info = env.step(actions)
-            buffer.insert(obs, state, act_move, act_offload, log_probs, r, val, done)
+            last_terminated = bool(info.get("terminated", False))
+            buffer.insert(obs, state, act_move, act_offload, log_probs, r, val, done, terminated=last_terminated)
 
             obs = next_obs
             state = next_state
@@ -333,6 +395,9 @@ def train_ippo(num_episodes: int = 80, seed: int = 42, device: str = "auto", eva
         t_up_start = time.time()
         agent.update(
             buffer,
+            next_obs=next_obs,
+            next_state=next_state,
+            last_terminated=last_terminated,
             ppo_epochs=cfg.mappo.ppo_epochs,
             batch_size=cfg.mappo.batch_size,
             gamma=cfg.mappo.gamma,
@@ -369,18 +434,32 @@ def train_ippo(num_episodes: int = 80, seed: int = 42, device: str = "auto", eva
             "wall_clock_sec": time.time() - start_total_time
         })
 
+        pbar.set_postfix({
+            "Ret": f"{ep_reward:6.1f}",
+            "Done": f"{comp_rate:4.1f}%",
+            "Energy": f"{ep_energy/1000.0:4.1f}kJ",
+            "Steps/s": f"{env_steps_per_sec:.0f}"
+        })
+
         if ep % 10 == 0 or ep == 1:
             val_str = f"ValRet: {val_stats['val_return']:6.1f} | " if not np.isnan(val_stats["val_return"]) else ""
-            print(f"[IPPO]  Ep {ep:3d}/{num_episodes} | Return: {ep_reward:7.2f} | {val_str}Done: {ep_completed:3d} ({comp_rate:5.1f}%) | Energy: {ep_energy/1000.0:6.1f} kJ | Steps/s: {env_steps_per_sec:.0f}")
+            pbar.write(f"[IPPO]  Ep {ep:3d}/{num_episodes} | Return: {ep_reward:7.2f} | {val_str}Done: {ep_completed:3d} ({comp_rate:5.1f}%) | Energy: {ep_energy/1000.0:6.1f} kJ | Steps/s: {env_steps_per_sec:.0f}")
 
     agent.save_checkpoint(final_ckpt)
+    if policy_variant == "pure":
+        compat_path = os.path.join(ckpt_dir, "best_ippo_agent.pt")
+        compat_final = os.path.join(ckpt_dir, "final_ippo_agent.pt")
+        import shutil
+        if os.path.exists(best_ckpt):
+            shutil.copyfile(best_ckpt, compat_path)
+        shutil.copyfile(final_ckpt, compat_final)
     pd.DataFrame(metrics).to_csv(csv_log, index=False)
     print(f"[IPPO Finished] Best Checkpoint: {best_ckpt} | Final: {final_ckpt} | Log: {csv_log}")
     return best_ckpt
 
-def train_maddpg(num_episodes: int = 80, seed: int = 42, device: str = "auto", eval_freq: int = 10) -> str:
+def train_maddpg(num_episodes: int = 80, seed: int = 42, device: str = "auto", policy_variant: str = "pure", eval_freq: int = 10) -> str:
     dev = DeviceManager.select_device(device)
-    DeviceManager.print_diagnostics(dev, seed=seed, extra_config={"Algorithm": "Multi-Agent DDPG (MADDPG)", "Episodes": num_episodes})
+    DeviceManager.print_diagnostics(dev, seed=seed, extra_config={"Algorithm": "Multi-Agent DDPG (MADDPG)", "Variant": policy_variant, "Episodes": num_episodes})
 
     cfg = MasterConfig()
     cfg.mappo.num_episodes = num_episodes
@@ -397,15 +476,16 @@ def train_maddpg(num_episodes: int = 80, seed: int = 42, device: str = "auto", e
         gamma=cfg.mappo.gamma,
         tau=0.01,
         noise_std=0.15,
+        policy_variant=policy_variant,
         device=dev
     )
 
     base_dir = os.path.dirname(os.path.abspath(__file__))
     res_dir = os.path.join(base_dir, "results")
     ckpt_dir = os.path.join(res_dir, "checkpoints")
-    best_ckpt = os.path.join(ckpt_dir, "best_maddpg_agent.pt")
-    final_ckpt = os.path.join(ckpt_dir, "final_maddpg_agent.pt")
-    csv_log = os.path.join(res_dir, "training_logs_maddpg.csv")
+    best_ckpt = os.path.join(ckpt_dir, f"best_maddpg_{policy_variant}_agent.pt")
+    final_ckpt = os.path.join(ckpt_dir, f"final_maddpg_{policy_variant}_agent.pt")
+    csv_log = os.path.join(res_dir, f"training_logs_maddpg_{policy_variant}.csv")
 
     best_val_return = -float("inf")
     metrics = []
@@ -413,7 +493,8 @@ def train_maddpg(num_episodes: int = 80, seed: int = 42, device: str = "auto", e
     total_update_time = 0.0
     start_total_time = time.time()
 
-    for ep in range(1, num_episodes + 1):
+    pbar = tqdm(range(1, num_episodes + 1), desc="[MADDPG]", unit="ep", ncols=115, dynamic_ncols=True)
+    for ep in pbar:
         t_env_start = time.time()
         obs, state = env.reset(seed=seed + ep)
 
@@ -473,11 +554,25 @@ def train_maddpg(num_episodes: int = 80, seed: int = 42, device: str = "auto", e
             "wall_clock_sec": time.time() - start_total_time
         })
 
+        pbar.set_postfix({
+            "Ret": f"{ep_reward:6.1f}",
+            "Done": f"{comp_rate:4.1f}%",
+            "Energy": f"{ep_energy/1000.0:4.1f}kJ",
+            "Steps/s": f"{env_steps_per_sec:.0f}"
+        })
+
         if ep % 10 == 0 or ep == 1:
             val_str = f"ValRet: {val_stats['val_return']:6.1f} | " if not np.isnan(val_stats["val_return"]) else ""
-            print(f"[MADDPG] Ep {ep:3d}/{num_episodes} | Return: {ep_reward:7.2f} | {val_str}Done: {ep_completed:3d} ({comp_rate:5.1f}%) | Energy: {ep_energy/1000.0:6.1f} kJ | Steps/s: {env_steps_per_sec:.0f}")
+            pbar.write(f"[MADDPG] Ep {ep:3d}/{num_episodes} | Return: {ep_reward:7.2f} | {val_str}Done: {ep_completed:3d} ({comp_rate:5.1f}%) | Energy: {ep_energy/1000.0:6.1f} kJ | Steps/s: {env_steps_per_sec:.0f}")
 
     agent.save_checkpoint(final_ckpt)
+    if policy_variant == "pure":
+        compat_path = os.path.join(ckpt_dir, "best_maddpg_agent.pt")
+        compat_final = os.path.join(ckpt_dir, "final_maddpg_agent.pt")
+        import shutil
+        if os.path.exists(best_ckpt):
+            shutil.copyfile(best_ckpt, compat_path)
+        shutil.copyfile(final_ckpt, compat_final)
     pd.DataFrame(metrics).to_csv(csv_log, index=False)
     print(f"[MADDPG Finished] Best Checkpoint: {best_ckpt} | Final: {final_ckpt} | Log: {csv_log}")
     return best_ckpt
@@ -517,7 +612,8 @@ def train_cppo(num_episodes: int = 80, seed: int = 42, device: str = "auto", eva
     start_total_time = time.time()
 
     ep_len = cfg.mappo.episode_length
-    for ep in range(1, num_episodes + 1):
+    pbar = tqdm(range(1, num_episodes + 1), desc="[CPPO]", unit="ep", ncols=115, dynamic_ncols=True)
+    for ep in pbar:
         t_env_start = time.time()
         obs, state = env.reset(seed=seed + ep)
 
@@ -607,45 +703,68 @@ def train_cppo(num_episodes: int = 80, seed: int = 42, device: str = "auto", eva
             "wall_clock_sec": time.time() - start_total_time
         })
 
+        pbar.set_postfix({
+            "Ret": f"{ep_reward:6.1f}",
+            "Done": f"{comp_rate:4.1f}%",
+            "Energy": f"{ep_energy/1000.0:4.1f}kJ",
+            "Steps/s": f"{env_steps_per_sec:.0f}"
+        })
+
         if ep % 10 == 0 or ep == 1:
             val_str = f"ValRet: {val_stats['val_return']:6.1f} | " if not np.isnan(val_stats["val_return"]) else ""
-            print(f"[CPPO]  Ep {ep:3d}/{num_episodes} | Return: {ep_reward:7.2f} | {val_str}Done: {ep_completed:3d} ({comp_rate:5.1f}%) | Energy: {ep_energy/1000.0:6.1f} kJ | Steps/s: {env_steps_per_sec:.0f}")
+            pbar.write(f"[CPPO]  Ep {ep:3d}/{num_episodes} | Return: {ep_reward:7.2f} | {val_str}Done: {ep_completed:3d} ({comp_rate:5.1f}%) | Energy: {ep_energy/1000.0:6.1f} kJ | Steps/s: {env_steps_per_sec:.0f}")
 
     agent.save_checkpoint(final_ckpt)
     pd.DataFrame(metrics).to_csv(csv_log, index=False)
     print(f"[CPPO Finished] Best Checkpoint: {best_ckpt} | Final: {final_ckpt} | Log: {csv_log}")
     return best_ckpt
 
-def train_all(num_episodes: int = 80, seed: int = 42, device: str = "auto"):
+def train_all(num_episodes: int = 80, seed: int = 42, device: str = "auto", policy_variant: str = "pure", curriculum: bool = False):
     """Trains all four primary learning algorithms under identical seed and episode budgets."""
     print("\n" + "=" * 80)
-    print(f" TRAINING COMPLETE MARL COMPARISON SUITE (Episodes: {num_episodes}, Seed: {seed})")
+    print(f" TRAINING COMPLETE MARL COMPARISON SUITE (Episodes: {num_episodes}, Seed: {seed}, Variant: {policy_variant}, Curriculum: {curriculum})")
     print("=" * 80)
-    train_mappo(num_episodes=num_episodes, seed=seed, device=device)
-    train_ippo(num_episodes=num_episodes, seed=seed, device=device)
-    train_maddpg(num_episodes=num_episodes, seed=seed, device=device)
+    train_mappo(num_episodes=num_episodes, seed=seed, device=device, policy_variant=policy_variant, curriculum=curriculum)
+    train_ippo(num_episodes=num_episodes, seed=seed, device=device, policy_variant=policy_variant)
+    train_maddpg(num_episodes=num_episodes, seed=seed, device=device, policy_variant=policy_variant)
     train_cppo(num_episodes=num_episodes, seed=seed, device=device)
+
+    # Automatically plot comparative convergence curve across all four algorithms
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    res_dir = os.path.join(base_dir, "results")
+    fig_dir = os.path.join(res_dir, "figures")
+    csv_dict = {
+        "mappo": os.path.join(res_dir, f"training_logs_mappo_{policy_variant}.csv" if os.path.exists(os.path.join(res_dir, f"training_logs_mappo_{policy_variant}.csv")) else os.path.join(res_dir, "training_logs_mappo.csv")),
+        "ippo": os.path.join(res_dir, f"training_logs_ippo_{policy_variant}.csv" if os.path.exists(os.path.join(res_dir, f"training_logs_ippo_{policy_variant}.csv")) else os.path.join(res_dir, "training_logs_ippo.csv")),
+        "maddpg": os.path.join(res_dir, f"training_logs_maddpg_{policy_variant}.csv" if os.path.exists(os.path.join(res_dir, f"training_logs_maddpg_{policy_variant}.csv")) else os.path.join(res_dir, "training_logs_maddpg.csv")),
+        "cppo": os.path.join(res_dir, "training_logs_cppo.csv")
+    }
+    plot_all_marl_training_convergence(csv_dict, os.path.join(fig_dir, "marl_training_convergence_comparison.png"))
+    print(f"[Suite Finished] Generated multi-algorithm convergence curve: {os.path.join(fig_dir, 'marl_training_convergence_comparison.png')}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Multi-Model Trainer for Multi-UAV Edge Computing")
     parser.add_argument("--model", type=str, default="all", choices=["all", "mappo", "ippo", "maddpg", "cppo", "ablation"],
                         help="Model to train")
+    parser.add_argument("--variant", type=str, default="pure", choices=["pure", "residual"],
+                        help="Policy variant for navigation: pure (pure neural) or residual (APF nominal + learned delta)")
     parser.add_argument("--ablation", type=str, default=None, choices=["no_energy", "no_safety", "fixed_offload"],
                         help="Ablation variant for MAPPO")
     parser.add_argument("--episodes", type=int, default=80, help="Number of training episodes")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--device", type=str, default="auto", choices=["auto", "cuda", "cpu"], help="Compute device")
+    parser.add_argument("--curriculum", action="store_true", default=False, help="Enable curriculum learning schedule")
     args = parser.parse_args()
 
     if args.model == "all":
-        train_all(num_episodes=args.episodes, seed=args.seed, device=args.device)
+        train_all(num_episodes=args.episodes, seed=args.seed, device=args.device, policy_variant=args.variant, curriculum=args.curriculum)
     elif args.model == "mappo":
-        train_mappo(num_episodes=args.episodes, seed=args.seed, device=args.device, ablation=args.ablation)
+        train_mappo(num_episodes=args.episodes, seed=args.seed, device=args.device, policy_variant=args.variant, ablation=args.ablation, curriculum=args.curriculum)
     elif args.model == "ippo":
-        train_ippo(num_episodes=args.episodes, seed=args.seed, device=args.device)
+        train_ippo(num_episodes=args.episodes, seed=args.seed, device=args.device, policy_variant=args.variant)
     elif args.model == "maddpg":
-        train_maddpg(num_episodes=args.episodes, seed=args.seed, device=args.device)
+        train_maddpg(num_episodes=args.episodes, seed=args.seed, device=args.device, policy_variant=args.variant)
     elif args.model == "cppo":
         train_cppo(num_episodes=args.episodes, seed=args.seed, device=args.device)
     elif args.model == "ablation":
-        train_mappo(num_episodes=args.episodes, seed=args.seed, device=args.device, ablation=args.ablation or "no_energy")
+        train_mappo(num_episodes=args.episodes, seed=args.seed, device=args.device, policy_variant=args.variant, ablation=args.ablation or "no_energy", curriculum=args.curriculum)

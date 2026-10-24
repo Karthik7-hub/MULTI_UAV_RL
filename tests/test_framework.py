@@ -230,9 +230,187 @@ def test_device_manager():
 
     print("  -> Passed: DeviceManager auto-detection, fallback, and error handling verified.")
 
+def test_continuous_swept_collision_detection():
+    print("[Test 8/11] Testing Continuous Swept Line-Segment Obstacle Interception...")
+    # Obstacle at (100, 100) with radius 10 and height 80
+    obstacles = [(100.0, 100.0, 10.0, 80.0)]
+    safety = SafetyFilter(obstacles=obstacles, d_safe=8.0, obstacle_margin=2.0)
+
+    # Current position at (80, 100, 50) [outside]
+    # Proposed position at (120, 100, 50) [outside on opposite side!]
+    # A discrete endpoint checker would see both endpoints OUTSIDE and fail to detect the collision!
+    current = {0: np.array([80.0, 100.0, 50.0], dtype=np.float32)}
+    proposed = {0: np.array([120.0, 100.0, 50.0], dtype=np.float32)}
+
+    filtered, interventions, stats = safety.filter_trajectories_with_stats(proposed, current)
+    assert interventions > 0, "Swept safety filter MUST detect straight-through trajectory penetration"
+    assert stats["proposed_collisions"] > 0, "Proposed collision counter must record swept penetration"
+
+    # Filtered position should be stopped in front of obstacle entry boundary
+    x_filt = filtered[0][0]
+    r_effective = 10.0 + 2.0  # radius + margin = 12.0
+    # Entry boundary along x is at 100 - 12 = 88.0
+    assert x_filt < 88.01, f"Filtered x-position {x_filt} must stop in front of obstacle boundary (88.0)"
+    assert stats["actual_collisions"] == 0, f"Actual collision must be 0 after intervention (got {stats['actual_collisions']})"
+    print("  -> Passed: Swept line-segment collision interception and safe deceleration verified.")
+
+def test_pure_vs_residual_policy_divergence():
+    print("[Test 9/11] Testing Pure vs. Residual Actor Network Output Mechanics...")
+    dev = torch.device("cpu")
+    # Observation with positive distance to goal and nearby obstacle
+    obs = np.zeros(26, dtype=np.float32)
+    obs[0:3] = np.array([20.0, 20.0, 0.0])  # Station relative vector
+    obs[3:6] = np.array([5.0, 0.0, 0.0])   # Velocity
+    obs[6:9] = np.array([10.0, 5.0, 0.0])  # Obstacle relative vector
+
+    t_obs = torch.tensor(obs, dtype=torch.float32).unsqueeze(0)
+
+    # 1. Pure Actor
+    actor_pure = MAPPOAgent(obs_dim=26, state_dim=104, num_uavs=4, hidden_dim=32, policy_variant="pure", device=dev).actor
+    # 2. Residual Actor
+    actor_residual = MAPPOAgent(obs_dim=26, state_dim=104, num_uavs=4, hidden_dim=32, policy_variant="residual", device=dev).actor
+
+    # Copy identical weights to verify structural divergence from APF guidance
+    actor_residual.load_state_dict(actor_pure.state_dict())
+
+    with torch.no_grad():
+        move_pure, _, _ = actor_pure.sample_action(t_obs, deterministic=True)
+        move_residual, _, _ = actor_residual.sample_action(t_obs, deterministic=True)
+
+    pure_np = move_pure.squeeze(0).numpy()
+    residual_np = move_residual.squeeze(0).numpy()
+
+    # The residual policy must combine nominal APF guidance with neural delta, so they must diverge
+    diff = np.linalg.norm(pure_np - residual_np)
+    assert diff > 0.01, f"Pure and Residual outputs must diverge due to explicit APF guidance vector (diff: {diff})"
+    print("  -> Passed: Pure vs. Residual policy architecture and nominal guidance verified.")
+
+def test_gae_value_bootstrapping_on_truncation():
+    print("[Test 10/11] Testing GAE Value Bootstrapping on Horizon Truncation vs. Termination...")
+    buf = RolloutBuffer(num_steps=5, num_uavs=1, obs_dim=4, state_dim=4)
+    # Populate dummy transitions
+    for t in range(5):
+        buf.insert(
+            obs={0: np.zeros(4, dtype=np.float32)},
+            state=np.zeros(4, dtype=np.float32),
+            act_move={0: np.zeros(3, dtype=np.float32)},
+            act_offload={0: 0},
+            log_prob={0: 0.0},
+            reward=1.0,
+            value=2.0,
+            done=(t == 4),
+            terminated=False  # Truncated by horizon at t=4, NOT terminal
+        )
+
+    # When truncated, last_val = 10.0 should be bootstrapped: delta_4 = 1.0 + gamma * 10.0 - 2.0
+    gamma = 0.99
+    gae_lambda = 0.95
+    adv_trunc, ret_trunc = buf.compute_gae(last_val=10.0, last_terminated=False, gamma=gamma, gae_lambda=gae_lambda)
+
+    expected_delta_4_trunc = 1.0 + gamma * 10.0 - 2.0  # 1.0 + 9.9 - 2.0 = 8.9
+    assert abs(adv_trunc[4] - expected_delta_4_trunc) < 1e-4, f"Truncated GAE failed to bootstrap next_val (got {adv_trunc[4]}, expected {expected_delta_4_trunc})"
+
+    # When genuinely terminated, last_val should be ZEROED out: delta_4 = 1.0 + 0.0 - 2.0 = -1.0
+    adv_term, ret_term = buf.compute_gae(last_val=10.0, last_terminated=True, gamma=gamma, gae_lambda=gae_lambda)
+    expected_delta_4_term = 1.0 - 2.0  # -1.0
+    assert abs(adv_term[4] - expected_delta_4_term) < 1e-4, f"Terminated GAE failed to stop discounting (got {adv_term[4]}, expected {expected_delta_4_term})"
+    print("  -> Passed: GAE advantage bootstrapping on truncation vs. termination verified.")
+
+def test_persistent_mec_queues_and_diagnostics():
+    print("[Test 11/12] Testing Persistent MEC Task Queues & Deterministic Offloading Diagnostics...")
+    from env.comms_compute import run_deterministic_offloading_diagnostics
+    diag_results = run_deterministic_offloading_diagnostics()
+    assert diag_results["all_diagnostics_verified"] is True
+    assert diag_results["backlogged_edge_local_delay"] < diag_results["backlogged_edge_delay"], "Local must beat backlogged edge"
+    assert diag_results["congested_edge_peer_delay"] < diag_results["congested_edge_delay"], "Peer must beat congested edge"
+    assert diag_results["heavy_task_edge_delay"] < diag_results["heavy_task_local_delay"], "Edge must beat local for heavy task"
+    print("  -> Passed: Persistent queues and non-trivial Local, Peer, Edge trade-offs verified.")
+
+def test_3d_navigation_objective_validation():
+    print("[Test 12/12] Testing Objective 3D Navigation Validation Across 7 Benchmark Scenarios...")
+    from models.astar import AStar3DPlanner, PurePursuit3DController
+    from env.safety_filter import SafetyFilter
+    from simulator_server import compute_min_clearance
+
+    bounds = (0.0, 200.0, 0.0, 200.0, 0.0, 100.0)
+    d_safe = 8.0
+    margin = 2.0
+    v_max = 15.0
+
+    # 1. Direct route with no obstacles
+    planner_1 = AStar3DPlanner(obstacles=[], bounds=bounds, grid_res=5.0, d_safe=d_safe, obstacle_margin=margin)
+    p_1, t_1, _ = planner_1.plan_path_with_details(np.array([20.0, 20.0, 20.0]), np.array([100.0, 100.0, 20.0]))
+    assert p_1 is not None and len(p_1) == 2, "Direct route must find immediate line-of-sight path"
+    tracker_1 = PurePursuit3DController(p_1, v_max=v_max)
+    pos_1 = np.array([20.0, 20.0, 20.0])
+    status_1 = "TRACKING"
+    for _ in range(20):
+        pos_1, _, _, status_1 = tracker_1.step(pos_1, dt=1.0)
+        if status_1 == "GOAL_REACHED":
+            break
+    assert status_1 == "GOAL_REACHED", f"Direct route tracker must reach goal (status: {status_1})"
+
+    # 2. Route requiring horizontal avoidance
+    obs_2 = [{"type": "cylinder", "cx": 60.0, "cy": 60.0, "radius": 15.0, "height": 95.0, "z_min": 0.0, "z_max": 95.0}]
+    planner_2 = AStar3DPlanner(obstacles=obs_2, bounds=bounds, grid_res=5.0, d_safe=d_safe, obstacle_margin=margin)
+    p_2, _, _ = planner_2.plan_path_with_details(np.array([20.0, 20.0, 10.0]), np.array([100.0, 100.0, 10.0]))
+    assert p_2 is not None, "Horizontal detour route must be found"
+    for wp in p_2:
+        c = compute_min_clearance(np.array(wp), obs_2, margin)
+        assert c >= -0.01, f"Waypoints must maintain clearance (got {c})"
+
+    # 3. Route requiring vertical overflight of a finite-height obstacle wall
+    # Solid wall of 40m-tall cylinders completely blocking horizontal passage from x=0 to 200 at y=100.
+    obs_3 = [{"type": "cylinder", "cx": float(x), "cy": 100.0, "radius": 15.0, "height": 40.0, "z_min": 0.0, "z_max": 40.0} for x in range(0, 225, 25)]
+    planner_3 = AStar3DPlanner(obstacles=obs_3, bounds=bounds, grid_res=5.0, d_safe=d_safe, obstacle_margin=margin)
+    p_3, _, _ = planner_3.plan_path_with_details(np.array([100.0, 40.0, 10.0]), np.array([100.0, 160.0, 10.0]))
+    assert p_3 is not None, "Overflight route must be found over cylinder wall"
+    max_z = max(wp[2] for wp in p_3)
+    assert max_z > 40.0 + (d_safe / 2.0), f"A* must fly OVER the 40m cylinder wall (max altitude reached: {max_z}m)"
+
+    # 4. Narrow but feasible passage between two cylinders
+    # Distance between centers is 50m. Radii are 15m each. Gap is 50 - 30 = 20m.
+    # Required clearance is d_safe + 2*margin = 8 + 4 = 12m < 20m (Feasible).
+    obs_4 = [
+        {"type": "cylinder", "cx": 60.0, "cy": 50.0, "radius": 15.0, "height": 80.0},
+        {"type": "cylinder", "cx": 60.0, "cy": 90.0, "radius": 15.0, "height": 80.0}
+    ]
+    planner_4 = AStar3DPlanner(obstacles=obs_4, bounds=bounds, grid_res=5.0, d_safe=d_safe, obstacle_margin=margin)
+    p_4, _, _ = planner_4.plan_path_with_details(np.array([20.0, 70.0, 20.0]), np.array([100.0, 70.0, 20.0]))
+    assert p_4 is not None, "Path through narrow feasible corridor must be found"
+
+    # 5. Route through dense obstacle cluster (Maze preset)
+    obs_5 = [
+        {"type": "cylinder", "cx": 50.0, "cy": 60.0, "radius": 14.0, "height": 80.0},
+        {"type": "cylinder", "cx": 90.0, "cy": 40.0, "radius": 15.0, "height": 80.0},
+        {"type": "cylinder", "cx": 140.0, "cy": 60.0, "radius": 16.0, "height": 80.0},
+        {"type": "cylinder", "cx": 70.0, "cy": 110.0, "radius": 18.0, "height": 80.0},
+        {"type": "cylinder", "cx": 120.0, "cy": 110.0, "radius": 15.0, "height": 80.0}
+    ]
+    planner_5 = AStar3DPlanner(obstacles=obs_5, bounds=bounds, grid_res=5.0, d_safe=d_safe, obstacle_margin=margin)
+    p_5, _, _ = planner_5.plan_path_with_details(np.array([20.0, 20.0, 10.0]), np.array([160.0, 160.0, 10.0]))
+    assert p_5 is not None, "Path through dense obstacle cluster must be found"
+
+    # 6. Genuinely unreachable goal (goal is placed inside a cylinder)
+    obs_6 = [{"type": "cylinder", "cx": 100.0, "cy": 100.0, "radius": 20.0, "height": 100.0, "z_min": 0.0, "z_max": 100.0}]
+    planner_6 = AStar3DPlanner(obstacles=obs_6, bounds=bounds, grid_res=5.0, d_safe=d_safe, obstacle_margin=margin)
+    p_6, _, _ = planner_6.plan_path_with_details(np.array([20.0, 20.0, 10.0]), np.array([100.0, 100.0, 10.0]))
+    assert p_6 is None, "Genuinely unreachable goal inside impenetrable cylinder must return None (NO_PATH_FOUND)"
+
+    # 7. Controller stall detection
+    # Provide a single far waypoint, but simulate a blocked position that cannot advance
+    tracker_7 = PurePursuit3DController([np.array([0.0, 0.0, 0.0]), np.array([100.0, 100.0, 10.0])], v_max=v_max)
+    stuck_pos = np.array([0.0, 0.0, 0.0])
+    for step_i in range(6):
+        # Pass dt=0.0 to simulate zero progress / external deadlock
+        _, _, _, status_7 = tracker_7.step(stuck_pos, dt=0.001)
+    assert status_7 == "CONTROLLER_STALLED", f"Zero progress must trigger CONTROLLER_STALLED (got {status_7})"
+
+    print("  -> Passed: All 7 objective 3D navigation benchmark cases verified successfully.")
+
 if __name__ == "__main__":
     print("\n" + "=" * 75)
-    print(" RUNNING RESEARCH UPGRADE VERIFICATION TEST SUITE")
+    print(" RUNNING COMPREHENSIVE RESEARCH VERIFICATION TEST SUITE (12 TESTS)")
     print("=" * 75)
     test_environment_contracts()
     test_mec_contention_and_offloading()
@@ -241,6 +419,12 @@ if __name__ == "__main__":
     test_model_training_updates()
     test_checkpointing()
     test_device_manager()
+    test_continuous_swept_collision_detection()
+    test_pure_vs_residual_policy_divergence()
+    test_gae_value_bootstrapping_on_truncation()
+    test_persistent_mec_queues_and_diagnostics()
+    test_3d_navigation_objective_validation()
     print("\n" + "=" * 75)
-    print(" ALL 7 RESEARCH UPGRADE VERIFICATION TESTS PASSED SUCCESSFULLY!")
+    print(" ALL 12 RESEARCH REPAIR VERIFICATION TESTS PASSED SUCCESSFULLY!")
     print("=" * 75)
+

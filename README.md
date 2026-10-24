@@ -1,276 +1,285 @@
-# Research_V2: Deep Reinforcement Learning for Joint Task Offloading and Energy-Efficient Path Planning in Multi-UAV Edge Computing
+# Multi-UAV 3D Navigation & Mobile Edge Computing: Joint MAPPO & Hierarchical Hybrid Framework
 
-[![Python 3.9+](https://img.shields.io/badge/python-3.9%20%7C%203.10%20%7C%203.11%20%7C%203.12%20%7C%203.14-blue.svg)](https://www.python.org/)
-[![PyTorch](https://img.shields.io/badge/PyTorch-2.0%2B-ee4c2c.svg)](https://pytorch.org/)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.14-blue.svg)](https://www.python.org/)
+[![PyTorch](https://img.shields.io/badge/PyTorch-2.0%2B%20%7C%20CUDA%20Ready-ee4c2c.svg)](https://pytorch.org/)
 [![Gymnasium](https://img.shields.io/badge/Gymnasium-0.29%2B-darkgreen.svg)](https://gymnasium.farama.org/)
-[![Tests](https://img.shields.io/badge/Tests-7%2F7%20Passing-brightgreen.svg)](tests/test_framework.py)
+[![Tests](https://img.shields.io/badge/Tests-12%2F12%20Passing-brightgreen.svg)](tests/test_framework.py)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![WebGL Simulator](https://img.shields.io/badge/Simulator-Three.js%203D-purple.svg)](http://127.0.0.1:5000)
 
-A clean, modular, and scientifically rigorous research framework for Multi-Agent Reinforcement Learning (**MAPPO**, **CPPO**, **IPPO**, **MADDPG**), 3D Geometric/Sampling/Potential Navigation (**3D A\***, **3D RRT\***, **3D SAPF**), and Classical Multi-Objective Mobile Edge Computing (MEC) baselines for joint continuous 3D UAV path planning and discrete computational task offloading.
+A comprehensive, publication-grade research framework evaluating **Joint Multi-Agent Reinforcement Learning (MAPPO, CPPO, IPPO, MADDPG)**, **Geometric & Sampling Path Planning (3D A\*, 3D RRT\*, 3D SAPF)**, and **Hierarchical Hybrid Planners (A\* + MAPPO)** for joint continuous 3D multi-UAV trajectory planning and discrete Mobile Edge Computing (MEC) task offloading.
 
 ---
 
-## 1. Directory Structure
+## 1. Complete Workflow: From Training to Publication Figures
 
-```
-research_v2/
-├── requirements.txt          # Framework dependencies (PyTorch, Gymnasium, NumPy, Pandas, Matplotlib, PyTest)
-├── config.py                 # Central system configuration, physical constants & obstacle geometry
-├── env/                      # Modular Environment, Physics & Safety Layer
-│   ├── __init__.py
-│   ├── aerodynamics.py       # Zeng et al. (2019) rotary-wing aerodynamic power model
-│   ├── comms_compute.py      # Shannon RF rate, OFDMA bandwidth sharing, computation queues & MEC contention
-│   ├── safety_filter.py      # Analytical kinematic projection filter for obstacle avoidance & peer separation
-│   └── multi_uav_env.py      # Gymnasium multi-agent environment with station verification & decomposed rewards
-├── models/                   # DRL Policies, Planners & Baselines
-│   ├── __init__.py
-│   ├── mappo.py              # Joint MAPPO (CTDE with dual Categorical/Gaussian heads & Centralized Critic)
-│   ├── cppo.py               # Centralized PPO (CTCE upper-bound centralized coordination baseline)
-│   ├── ippo.py               # Independent PPO (DTDE decentralized local critic baseline)
-│   ├── maddpg.py             # Multi-Agent DDPG (Off-policy continuous actor + Centralized Q-Critic)
-│   ├── astar.py              # 3D A* Path Planner (Discretized grid with obstacle clearance margin)
-│   ├── rrt_star.py           # 3D RRT* Path Planner (Sampling-based asymptotic optimal tree with dynamic rewiring)
-│   ├── apf.py                # 3D SAPF Navigator (Sequential adaptive potential field with tangential circulation)
-│   └── baselines.py          # Classical MEC baselines (Energy-Deadline Greedy, Lowest-Latency, Nearest, Local, Edge, Random)
-├── utils/                    # Utilities & Device Management
-│   ├── __init__.py
-│   └── device.py             # Unified DeviceManager (auto, cuda, cpu) with diagnostics & seed verification
-├── plots/                    # Publication Plotting Suite
-│   ├── __init__.py
-│   ├── plot_curves.py        # Publication curves, Pareto frontiers, 3D trajectories, and bar breakdowns
-│   └── plot_trajectory_comparison.py # Multi-navigator 3D trajectory visualizer (saves 300 DPI PNG & vector PDF)
-├── docs/                     # Comprehensive Documentation & Defense Guides
-│   ├── EQUATIONS_AND_CODE_GUIDE.md # Exhaustive mathematical derivations, code mappings & viva questions
-│   └── PROJECT_WALKTHROUGH.md      # Architecture diagrams, step-by-step pipeline lifecycle & sequence flows
-├── train.py                  # Training pipeline with validation scenarios, throughput metrics & ablation modes
-├── evaluate.py               # Multi-seed held-out evaluation & scientific benchmarking across 9 methods
-├── run_navigation_experiments.py # Experiment A: Dedicated 3D path planning & trajectory benchmark suite
-├── plot_results.py           # Standalone publication figure regenerator (no retraining required)
-├── main.py                   # Master CLI entry point (train / evaluate / plot / ablation / all)
-├── tests/
-│   └── test_framework.py     # 7-part automated verification & contract test suite
-├── results/                  # Generated checkpoints, CSV logs, JSON configs & publication figures
-│   ├── checkpoints/          # Best validation & final model weights (*.pt)
-│   ├── figures/              # Publication figures (.png at 300 DPI, .pdf vector)
-│   ├── benchmark_summary.csv # Multi-seed aggregate benchmark table (Mean ± Std)
-│   ├── navigation_benchmark.csv # 3D navigation benchmark table (Path length, clearance, planning time, success)
-│   ├── trajectory_records.csv# Granular step-by-step 3D flight coordinates across all navigators
-│   ├── offloading_distribution.csv # % Local vs % Peer vs % Edge breakdown
-│   ├── ablation_summary.csv  # Component ablation comparison table
-│   └── benchmark_detailed.csv# Per-seed granular episode records
-└── README.md
+```mermaid
+flowchart TD
+    A[Environment Setup: CPU / CUDA GPU] --> B[1. Verification Suite: pytest tests/]
+    B --> C[2. Training Pipeline: train.py]
+    C -->|Checkpoint Weights| D[3. Evaluation & Benchmarking: evaluate.py]
+    C -->|Checkpoints & Geometries| E[4. Complex Topographies: run_navigation_experiments.py]
+    E --> F[5. Fleet Scalability Suite: scratch/run_scalable_complex_experiments.py]
+    F --> G[6. Publication Figure Generation: plots/generate_publication_figures.py]
+    G --> H[7. Interactive WebGL 3D Simulator: simulator_server.py]
+    
+    style A fill:#e0f2fe,stroke:#0284c7
+    style C fill:#dcfce7,stroke:#16a34a
+    style G fill:#fef3c7,stroke:#d97706
+    style H fill:#f3e8ff,stroke:#9333ea
 ```
 
 ---
 
-## 2. Core Physics & Theoretical Formulation
+## 2. Quick Command Reference Cheat Sheet
 
-### 2.1 Rotary-Wing Aerodynamics (Zeng et al., 2019)
-The propulsion power consumption for a rotary-wing UAV flying at instantaneous horizontal airspeed $v$ is modeled following the closed-form aerodynamic formulation:
+### Phase 1: Installation & Environment Setup
+```powershell
+# 1. Create and activate virtual environment
+python -m venv .venv
+.venv\Scripts\Activate.ps1       # Windows PowerShell
+# source .venv/bin/activate      # Linux / macOS
 
-$$P(v) = \underbrace{P_0 \left(1 + \frac{3v^2}{U_{\text{tip}}^2}\right)}_{\text{Blade Profile Power}} + \underbrace{P_i \left(\sqrt{1 + \frac{v^4}{4v_0^4}} - \frac{v^2}{2v_0^2}\right)^{1/2}}_{\text{Induced Power}} + \underbrace{\frac{1}{2} d_0 \rho s A v^3}_{\text{Parasite Drag Power}}$$
+# 2. Install base dependencies
+pip install --upgrade pip
+pip install -r requirements.txt
 
-* **Hovering Power:** $P(0) = P_0 + P_i = 79.86\text{ W} + 88.63\text{ W} = 168.49\text{ W}$.
-* **Optimal Cruise Speed:** Translational lift reduces induced power at moderate speeds, yielding an optimal cruising speed $v^* \approx 10.3\text{ m/s}$ where power drops to $\approx 126.5\text{ W}$ (a $\approx 25\%$ energy saving over hovering).
-* **Anti-Loitering Damping:** Enforces zero velocity once within station deadband ($r \le 0.5\text{ m}$) to prevent high-speed orbiting or loitering waste.
-
-### 2.2 Wireless Communication & Multi-User Contention
-UAVs communicate with peer UAVs and the Ground Edge Server using Orthogonal Frequency-Division Multiple Access (OFDMA):
-* **Shannon Channel Capacity with OFDMA Slicing:**
-  $$R_j(d_j) = \frac{B}{K_{tx}} \log_2\left(1 + \frac{P_{tx} \beta_0 d_j^{-2}}{\sigma^2}\right)$$
-  where $B = 20\text{ MHz}$, $K_{tx}$ is the instantaneous count of concurrent transmitting nodes sharing the band, $P_{tx} = 0.1\text{ W}$ ($20\text{ dBm}$), $\beta_0 = -50\text{ dB}$ is reference channel power gain at $1\text{ m}$, and $\sigma^2 = -100\text{ dBm}$ is noise power spectral density.
-* **Transmission Delay & Energy:**
-  $$T_{tx} = \frac{D_k}{R_j(d_j)}, \quad E_{tx} = P_{tx} \cdot T_{tx}$$
-
-### 2.3 Mobile Edge Computing & DVFS Dynamics
-Tasks are generated via a Poisson arrival process with data size $D_k \in [1, 5]\text{ Mbits}$ and workload $C_k = D_k \times X_k$ CPU cycles (where $X_k = 1000\text{ cycles/bit}$):
-* **Ground Edge Server:** Total CPU capacity $f_{edge} = 20\text{ GHz}$ dynamically sliced across all concurrent offloaders:
-  $$f_{edge\_eff} = \frac{f_{edge}}{K_{edge}}$$
-* **Peer UAV Computing:** Offload target UAVs allocate $f_{peer} / 2$ to peer tasks while executing local tasks ($f_{uav} = 2.0\text{ GHz}$).
-* **Local DVFS Energy:**
-  $$E_{comp} = \kappa \, (f_{local})^2 \, C_k, \quad \kappa = 10^{-28}$$
-
-### 2.4 Airspace Obstacles & Analytical Kinematic Safety Filter
-* **Geometry:** 4 Cylindrical obstacles ($r = 10\text{ m}$, heights $75\text{--}85\text{ m}$) placed directly in between the initial deployment perimeter ring ($R_{start} = 65\text{ m}$) and mission stations ($R_{station} = 20\text{ m}$).
-* **Analytical Projection Filter:** Intercepts proposed displacement vectors $\Delta \mathbf{p}_j$, analytically projecting trajectories onto obstacle tangent surfaces with a safety margin $d_{margin} = 2.0\text{ m}$ and enforcing pairwise separation $d_{safe} = 8.0\text{ m}$ between peer UAVs with non-zero fallback separation vectors.
-
-### 2.5 Multi-Agent Reinforcement Learning Hierarchy
-1. **Proposed Joint MAPPO (CTDE):** Decentralized dual-head actor policies (Gaussian continuous 3D velocity $\Delta \mathbf{p}_j$ + Categorical discrete offloading target $a_{off} \in \{0, \dots, N\}$) paired with a Centralized Value Function $V(S)$ conditioned on the full state. Optimized via Generalized Advantage Estimation (GAE, $\gamma=0.99, \lambda=0.95$).
-2. **Centralized PPO (CPPO, CTCE):** Centralized Actor and Centralized Critic commanding joint actions for the entire fleet simultaneously (upper bound on coordination).
-3. **Independent PPO (IPPO, DTDE):** Fully decentralized actors and decentralized local critics $V_j(o_j)$ operating under partial observability.
-4. **Multi-Agent DDPG (MADDPG, CTDE):** Off-policy continuous actor with Gumbel-Softmax discrete offloading relaxation and Centralized Continuous Action-Value Critic $Q(S, A)$.
-
-### 2.6 Dedicated 3D Path Planners & Classical MEC Baselines
-* **3D A\* Path Planner:** Discretized 3D grid with heuristic distance cost and obstacle bypass waypoints.
-* **3D RRT\* Path Planner:** Continuous sampling-based tree with dynamic rewiring radius for asymptotic path optimality around cylindrical obstacles.
-* **3D SAPF Navigator:** Sequential Adaptive Potential Field with attractive goal force, nonlinear obstacle repulsive fields, dynamic inter-UAV repulsion, and tangential circulation to prevent local minima.
-* **Classical MEC Baselines:**
-  * **Energy-Deadline Aware Greedy MEC:** Optimizes $J = \text{Delay} + \beta E + \text{Penalty}_{deadline}$.
-  * **Lowest-Latency MEC:** Greedily selects the route minimizing transmission plus computation delay.
-  * **Nearest Feasible MEC:** Offloads to the geometrically nearest operational node.
-  * **Local-Only Execution:** Forces 100% on-board CPU processing (lower bound for offloading benefits).
-  * **Edge-Only Execution:** Forces 100% offloading to the Ground Edge Server (upper bound for edge reliance).
-  * **Random Feasible MEC:** Stochastic random feasible node allocation (statistical lower bound).
+# 3. Verify all 12 physical contracts and safety tests pass
+python -m pytest tests/test_framework.py
+```
 
 ---
 
-## 3. Installation & Environment Setup
+### Phase 2: Training Pipeline Commands
 
-### 3.1 Prerequisites
-* Python 3.9, 3.10, 3.11, 3.12, or 3.14
-* Recommended: Virtual environment (`venv` or `conda`)
-* OS: Windows, Linux, or macOS
+#### A. Running on CPU (Standard Local Training — Available Now)
+```powershell
+# Train Proposed APF-Assisted Residual MAPPO (Best multi-agent performance)
+python train.py --model mappo --policy_variant residual --episodes 40 --seed 42 --device cpu
 
-### 3.2 Step-by-Step Installation
+# Train Pure MAPPO (End-to-end continuous 3D velocity without nominal prior)
+python train.py --model mappo --policy_variant pure --episodes 40 --seed 42 --device cpu
 
-1. **Clone the repository:**
-   ```bash
-   git clone https://github.com/Karthik7-hub/MULTI_UAV_RL.git
-   cd MULTI_UAV_RL
-   ```
+# Train Independent PPO (IPPO, Decentralized Actor-Critic baseline)
+python train.py --model ippo --episodes 40 --seed 42 --device cpu
 
-2. **Create and activate a virtual environment:**
-   * **Windows (PowerShell):**
-     ```powershell
-     python -m venv .venv
-     .venv\Scripts\Activate.ps1
-     ```
-   * **Linux / macOS (Bash):**
-     ```bash
-     python3 -m venv .venv
-     source .venv/bin/activate
-     ```
+# Train Multi-Agent DDPG (MADDPG, Continuous off-policy baseline)
+python train.py --model maddpg --episodes 40 --seed 42 --device cpu
 
-3. **Install dependencies:**
-   ```bash
-   pip install --upgrade pip
-   pip install -r requirements.txt
-   ```
+# Train Centralized PPO (CPPO, Joint-action centralized execution baseline)
+python train.py --model cppo --episodes 40 --seed 42 --device cpu
+```
 
-4. **(Optional) PyTorch with GPU / CUDA Support:**
-   If you have an NVIDIA GPU and want hardware acceleration, install PyTorch matching your CUDA version:
-   ```bash
-   # Example for CUDA 12.1
-   pip install torch --index-url https://download.pytorch.org/whl/cu121
-   ```
+#### B. Running on GPU / CUDA (High-Performance Hardware Acceleration)
+When moving to a workstation or cloud instance with an NVIDIA GPU:
+```powershell
+# 1. Install CUDA-enabled PyTorch (e.g. CUDA 12.1)
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+
+# 2. Verify CUDA hardware detection
+python -c "import torch; print('CUDA Available:', torch.cuda.is_available(), '| GPU:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'None')"
+
+# 3. Train models on GPU (Scale to 150-300 episodes with higher batch size)
+python train.py --model mappo --policy_variant residual --episodes 150 --seed 42 --device cuda
+python train.py --model mappo --policy_variant pure --episodes 150 --seed 42 --device cuda
+python train.py --model ippo --episodes 150 --seed 42 --device cuda
+python train.py --model maddpg --episodes 150 --seed 42 --device cuda
+python train.py --model cppo --episodes 150 --seed 42 --device cuda
+
+# Automatic hardware device selection (targets CUDA if found, falls back cleanly to CPU)
+python train.py --model mappo --policy_variant residual --episodes 100 --device auto
+```
+
+#### C. Training Ablation Studies
+```powershell
+# Ablation 1: Disable aerodynamic propulsion energy reward shaping
+python train.py --model ablation --ablation no_energy --episodes 40 --device auto
+
+# Ablation 2: Disable analytical safety barrier penalty
+python train.py --model ablation --ablation no_safety --episodes 40 --device auto
+```
 
 ---
 
-## 4. Quick Start & Execution Workflow
+### Phase 3: Evaluation & Benchmarking Commands
 
-### A. Run Verification Tests First
-Ensure all physical contracts, environment spaces, safety filters, and model dimensions pass:
-```powershell
-python -m pytest tests/
-# or
-python tests/test_framework.py
-```
-
-### B. Hardware Device Options
-All entry points accept `--device auto` (default: auto-detects CUDA, falls back cleanly to CPU), `--device cuda`, or `--device cpu`:
-```powershell
-# Auto-detect CUDA if available, fallback to CPU
-python main.py --mode all --device auto
-
-# Explicitly target CUDA (raises informative error if CUDA is missing)
-python main.py --mode train --model mappo --device cuda
-
-# Force CPU execution
-python main.py --mode train --model mappo --device cpu
-```
-
-### C. Training Models
-Train individual MARL policies or train all policies sequentially:
-```powershell
-# Train Proposed Joint MAPPO
-python train.py --model mappo --episodes 80 --seed 42 --device auto
-
-# Train Centralized PPO (CPPO)
-python train.py --model cppo --episodes 80 --seed 42 --device auto
-
-# Train Independent PPO (IPPO) Baseline
-python train.py --model ippo --episodes 80 --seed 42 --device auto
-
-# Train Multi-Agent DDPG (MADDPG) Baseline
-python train.py --model maddpg --episodes 80 --seed 42 --device auto
-
-# Train all models sequentially
-python train.py --model all --episodes 80 --seed 42 --device auto
-```
-
-### D. Component Ablation Experiments
-Validate individual reward components and structural mechanisms:
-```powershell
-# Ablation 1: MAPPO without energy reward shaping
-python train.py --model ablation --ablation no_energy --episodes 80 --device auto
-
-# Ablation 2: MAPPO without safety penalty
-python train.py --model ablation --ablation no_safety --episodes 80 --device auto
-
-# Ablation 3: MAPPO navigation with fixed greedy offloading heuristic
-python train.py --model ablation --ablation fixed_offload --episodes 80 --device auto
-```
-
-### E. Multi-Seed Benchmark Evaluation
-Benchmarking across 9 distinct learning and classical methods over held-out random seeds:
+#### A. Comprehensive Multi-Seed DRL vs. Classical Baselines
+Runs held-out evaluation seeds across 9 methods, generating aggregated mean $\pm$ standard deviation tables:
 ```powershell
 python evaluate.py --device auto --num_seeds 5
 ```
 
-### F. Experiment A: 3D Path Planning & Trajectory Comparison Benchmark
-Simulate and benchmark all 7 navigation algorithms (3D A*, 3D RRT*, 3D SAPF, MAPPO, IPPO, MADDPG, CPPO) under identical obstacle geometries:
+#### B. 3D Navigation Benchmark Across Complex Airspace Topographies
+Tests all algorithms under genuine 3D aerodynamics, finite-height cylinders, and obstacle corridors:
 ```powershell
-python run_navigation_experiments.py --device auto --seed 101
-```
-* Generates `results/trajectory_records.csv` (step-by-step 3D flight coordinates)
-* Generates `results/navigation_benchmark.csv` (path length, clearance margin, planning latency, success rate)
-* Generates `results/figures/3d_uav_trajectory_comparison.png` (300 DPI) & `3d_uav_trajectory_comparison.pdf` (vector PDF)
+# 1. Standard Benchmark (4 corridor obstacles)
+python run_navigation_experiments.py --preset benchmark --num_uavs 4 --seed 101 --device auto
 
-### G. Regenerate Figures from Saved Data (Without Retraining)
-Instantly re-create all publication figures from stored CSV logs without re-running training:
+# 2. Canyon Chokepoint (8 flanking constrictions forming narrow 10m bottleneck passes)
+python run_navigation_experiments.py --preset chokepoint --num_uavs 4 --seed 101 --device auto
+
+# 3. Metropolis Skyscraper City (20 high-rise towers, 50m-92m height)
+python run_navigation_experiments.py --preset metropolis --num_uavs 4 --seed 101 --device auto
+```
+
+#### C. Swarm Fleet Scalability Experiments ($N \in \{4, 6, 8, 12\}$ UAVs)
+Evaluates Ground Edge Server queue saturation, peer relaying, and inter-UAV collision deconfliction under increasing fleet density:
 ```powershell
+python scratch/run_scalable_complex_experiments.py
+```
+
+---
+
+### Phase 4: Publication Figure Generation Commands
+
+Regenerate all publication-grade figures (both 350 DPI PNG and Vector PDF for LaTeX `\includegraphics`) directly from saved CSV benchmarks **without retraining**:
+```powershell
+# 1. Generate unified master research paper figure suite (Figures 1 to 5)
+python scratch/compile_master_results.py
+
+# 2. Standalone publication figures (Pareto frontiers, power curves, ablation plots)
 python plot_results.py
 ```
 
-### H. End-to-End Execution Pipeline
-Execute the full train $\to$ evaluate $\to$ plot pipeline in one command:
+---
+
+### Phase 5: Interactive 3D WebGL Simulator Server
+
+Launch the local interactive simulator backend powered by Flask and Three.js:
 ```powershell
-python main.py --mode all --device auto
+python simulator_server.py
+```
+Open your browser to:
+👉 **`http://127.0.0.1:5000`**
+
+- **Scenario Selector Dropdown**: Switch dynamically between `Benchmark`, `Metropolis (20 Skyscrapers)`, `Chokepoint Canyon (Narrow Pass)`, and `Mixed Spheres`.
+- **Algorithm Switcher**: Select between `3D A*`, `Hierarchical A* + MAPPO`, `APF Residual MAPPO`, and `Pure MAPPO`.
+- **Live 3D Flight Inspection**: Rotate, pan, and zoom around the 3D airspace to inspect drone flight trajectories, speed vectors, obstacle clearance halos, and live decision explanations.
+- **Benchmark Button**: Runs side-by-side comparative benchmarks on the active world layout directly in your browser.
+
+---
+
+## 3. Results Folder Architecture & Master Benchmark
+
+All generated benchmark summaries, logs, trained weights, and figures are neatly cataloged in [`results/`](results/):
+
+```text
+results/
+├── README.md                                 # Directory navigation guide
+├── MASTER_RESEARCH_REPORT.md                 # Complete formal scientific benchmark report
+│
+├── benchmarks/                               # Processed empirical benchmark tables
+│   ├── master_multicase_benchmark.csv        # Unified 9-model, 3-scenario comparison
+│   ├── complex_metropolis_benchmark.csv      # 20-Skyscraper city benchmark (all 9 models)
+│   ├── complex_chokepoint_benchmark.csv      # 8-Constriction bottleneck benchmark (all 9 models)
+│   ├── fleet_scalability_benchmark.csv       # Fleet scalability N in {4, 6, 8, 12} UAVs
+│   ├── navigation_benchmark.csv              # Standard benchmark (4 obstacles, 9 models)
+│   └── offloading_distribution.csv           # Local vs Peer vs Edge offload ratios
+│
+├── figures/                                  # Publication figures (350 DPI PNG + Vector PDF)
+│   ├── figure1_multimodel_training_convergence.png / .pdf
+│   ├── figure2_multicase_algorithm_benchmark.png / .pdf
+│   ├── figure3_fleet_scalability_curve.png / .pdf
+│   ├── figure4_pareto_latency_energy_frontier.png / .pdf
+│   └── figure5_3d_metropolis_flight_trajectories.png / .pdf
+│
+├── logs/                                     # Raw episodic training histories
+│   ├── training_logs_mappo_residual.csv      # APF Residual MAPPO (40 episodes)
+│   ├── training_logs_mappo_pure.csv          # Pure MAPPO (40 episodes)
+│   ├── training_logs_ippo.csv                # Independent PPO (40 episodes)
+│   ├── training_logs_maddpg.csv              # Multi-Agent DDPG (40 episodes)
+│   └── training_logs_cppo.csv                # Centralized PPO (40 episodes)
+│
+└── checkpoints/                              # PyTorch neural policy weights (*.pt)
+    ├── best_mappo_residual_agent.pt
+    ├── best_mappo_pure_agent.pt
+    ├── best_ippo_agent.pt
+    ├── best_maddpg_agent.pt
+    └── best_cppo_agent.pt
 ```
 
 ---
 
-## 5. Generated Publication-Grade Figures
+## 4. Master Cross-Case Empirical Findings
 
-All figures are automatically formatted for academic publication and saved at 300 DPI to `results/figures/`:
+### A. Environmental Topography Stress Test ($N = 4$ UAVs)
 
-| Figure Name | Description | Key Insight / Result |
-| :--- | :--- | :--- |
-| `3d_uav_trajectory_comparison.png` / `.pdf` | 4-panel visualizer: 3D spatial flight paths, top-down 2D bypass corridors, distance-to-station convergence, and metric comparison table. | Demonstrates MAPPO learning continuous aerodynamic curves around obstacles while RRT*/A* produce piecewise paths. |
-| `trajectory_diagnostic_comparison.png` | 4-panel diagnostic comparison of 2D trajectories, station distances, flight velocities, and fleet cumulative energy over 100 s. | Proves velocity stabilization at optimal cruise speed ($10.3\text{ m/s}$) followed by smooth loitering deceleration. |
-| `multimodel_performance_curves.png` | 4-panel comparative evaluation comparing MAPPO, IPPO, MADDPG, and 3D A*. | Shows superior return convergence and energy efficiency of MAPPO over decentralized baselines. |
-| `mappo_vs_astar_diagnostic.png` | Pairwise comparison of Proposed MAPPO vs 3D A* Baseline. | Confirms smooth kinematic curvatures outperform rigid grid transitions in propulsion energy. |
-| `mappo_vs_ippo_ablation.png` | CTDE vs DTDE ablation evaluating multi-agent coordination. | Demonstrates that centralized critic mitigates non-stationarity and eliminates inter-agent collisions. |
-| `mappo_vs_maddpg_comparison.png` | Policy architecture comparison (On-Policy MAPPO vs Off-Policy MADDPG). | Highlights MAPPO's training stability and higher deadline satisfaction rate. |
-| `offloading_distribution_breakdown.png` | Stacked horizontal bar chart showing % Local, % Peer, and % Edge decisions. | Demonstrates balanced multi-tier offloading adapting to wireless channel quality and queue backlogs. |
-| `pareto_latency_energy_tradeoff.png` | Multi-objective Pareto frontier showing Latency (s) vs Fleet Energy (kJ). | Establishes MAPPO at the optimal non-dominated frontier tradeoff point. |
-| `ablation_study_comparison.png` | Grouped comparative analysis of reward and modular ablations. | Quantifies performance drops when removing energy shaping or safety projection. |
-| `3d_flight_trajectories.png` | 3D airspace visualization with cylindrical obstacle geometries and flight paths. | Visualizes fleet clearance from cylindrical obstacle boundaries. |
-| `training_convergence_curves.png` | Episodic return progression with moving averages and confidence bounds. | Demonstrates stable asymptotic convergence within 80 episodes. |
-| `aerodynamic_power_curve.png` | Zeng et al. mechanical power curve breakdown (induced, profile, parasite). | Theoretical curve validating $168.5\text{ W}$ hover power and $126.5\text{ W}$ cruise minimum. |
+| Topography | Algorithm | Key | Mean Path (m) | Arrival Time (s) | Swarm Energy (kJ) | Safety Interventions | Success Rate (%) |
+| :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Benchmark**<br>*(4 Cylinders)* | **Hierarchical A\* + MAPPO (Hybrid)** | `hybrid_astar_mappo` | **60.00** | **4.0** | **66.94** | **0** | **100.0%** |
+| | APF Residual MAPPO | `mappo_residual` | 213.28 | 4.0 | 65.27 | 0 | 100.0% |
+| | 3D A\* Baseline | `astar` | 61.15 | 5.0 | 66.77 | 0 | 100.0% |
+| | 3D SAPF (Adaptive Field) | `sapf` | 87.27 | 6.0 | 66.63 | 0 | 100.0% |
+| | 3D RRT\* (Optimal Tree) | `rrt_star` | 76.34 | 6.8 | 66.41 | 0 | 100.0% |
+| | Pure MAPPO (No Guidance) | `mappo_pure` | 26.75 | 100.0 | 67.40 | 74 | 0.0% |
+| | Independent PPO (IPPO) | `ippo` | 166.20 | 100.0 | 65.07 | 88 | 0.0% |
+| | Centralized PPO (CPPO) | `cppo` | 155.13 | 100.0 | 65.10 | 113 | 0.0% |
+| | Multi-Agent DDPG (MADDPG) | `maddpg` | 442.07 | 100.0 | 60.48 | 198 | 0.0% |
+| **Canyon Chokepoint**<br>*(8 Constrictions)* | **Hierarchical A\* + MAPPO (Hybrid)** | `hybrid_astar_mappo` | **73.31** | **5.0** | **66.80** | **0** | **100.0%** |
+| | 3D A\* Baseline | `astar` | 73.31 | 7.0 | 66.58 | 0 | 100.0% |
+| | 3D SAPF (Adaptive Field) | `sapf` | 45.00 | 3.0 | 67.04 | 0 | 100.0% |
+| | 3D RRT\* (Optimal Tree) | `rrt_star` | 99.76 | 8.5 | 66.25 | 0 | 100.0% |
+| | APF Residual MAPPO | `mappo_residual` | 19.19 | 100.0 | 67.24 | 396 | 0.0% (Wall trap) |
+| **Metropolis City**<br>*(20 Skyscrapers)* | **Hierarchical A\* + MAPPO (Hybrid)** | `hybrid_astar_mappo` | **98.25** | **6.8** | **66.60** | **12** | **100.0%** |
+| | 3D A\* Baseline | `astar` | 108.17 | 8.5 | 66.36 | 12 | 100.0% |
+| | 3D SAPF (Adaptive Field) | `sapf` | 161.95 | 13.5 | 65.46 | 36 | 100.0% |
+| | 3D RRT\* (Optimal Tree) | `rrt_star` | 12.70 | 100.0 | 67.24 | 412 | 0.0% |
+| | APF Residual MAPPO | `mappo_residual` | 13.05 | 100.0 | 67.27 | 412 | 0.0% (Maze trap) |
+
+### B. Fleet Scalability Analysis ($N = 4 \to 12$ UAVs)
+
+| Fleet Size $N$ | Algorithm | Mean Task Delay (s) | Energy per UAV (kJ) | Barrier Interventions | Mission Success (%) |
+| :---: | :--- | :---: | :---: | :---: | :---: |
+| **$N = 4$** | **Hierarchical A\* + MAPPO (Hybrid)** | **1.63** | **16.74** | **0.0** | **100.0%** |
+| | 3D A\* Baseline | 2.02 | 16.69 | 0.0 | 100.0% |
+| **$N = 6$** | **Hierarchical A\* + MAPPO (Hybrid)** | **3.44** | **16.77** | **0.0** | **100.0%** |
+| | 3D A\* Baseline | 5.44 | 16.74 | 0.0 | 100.0% |
+| **$N = 8$** | **Hierarchical A\* + MAPPO (Hybrid)** | **4.32** | **16.76** | **0.0** | **100.0%** |
+| | 3D A\* Baseline | 11.19 | 16.73 | 0.0 | 100.0% |
+| | APF Residual MAPPO | 4.37 | 16.62 | 4.5 | 100.0% |
+| **$N = 12$** | **Hierarchical A\* + MAPPO (Hybrid)** | **7.53** | **16.77** | **0.0** | **100.0%** |
+| | 3D A\* Baseline | 31.45 | 16.74 | 4.0 | 100.0% |
+| | APF Residual MAPPO | 7.48 | 16.63 | 11.0 | 100.0% |
 
 ---
 
-## 6. Mathematical Foundations & Defense Documentation
+## 5. Overview of Generated Publication Figures
 
-For detailed mathematical proofs, parameter tables, and viva defense preparation, refer to the guides in `docs/`:
-
-* **[Mathematical & Algorithmic Code Guide](docs/EQUATIONS_AND_CODE_GUIDE.md):** Complete line-by-line mapping between mathematical equations and code implementations, physical constant derivation, reward formulation, and expected academic review defense questions with detailed answers.
-* **[Project Architecture Walkthrough](docs/PROJECT_WALKTHROUGH.md):** High-level Mermaid sequence flows, simulation step lifecycles, and policy execution diagrams.
+| Figure | Description | High-Res PNG | Vector PDF |
+| :---: | :--- | :---: | :---: |
+| **Figure 1** | **Multi-Model Training Convergence**: Return, Completion %, Energy, and Interventions with $\pm 1\,\sigma$ variance envelopes comparing all 5 DRL algorithms in one multi-panel figure. | [PNG (350 DPI)](results/figures/figure1_multimodel_training_convergence.png) | [PDF](results/figures/figure1_multimodel_training_convergence.pdf) |
+| **Figure 2** | **Multi-Scenario Benchmark Comparison**: Grouped comparative bar plots comparing all models across Benchmark, Chokepoint, and Metropolis topographies. | [PNG (350 DPI)](results/figures/figure2_multicase_algorithm_benchmark.png) | [PDF](results/figures/figure2_multicase_algorithm_benchmark.pdf) |
+| **Figure 3** | **Swarm Fleet Scalability Benchmark ($N \in \{4, 6, 8, 12\}$)**: Task latency queue blowout, energy per UAV, collision interventions, and offload allocation breakdown. | [PNG (350 DPI)](results/figures/figure3_fleet_scalability_curve.png) | [PDF](results/figures/figure3_fleet_scalability_curve.pdf) |
+| **Figure 4** | **Multi-Objective Pareto Frontier**: Total Energy vs. Average Task Delay mapping all methods and swarm sizes with Pareto region shading. | [PNG (350 DPI)](results/figures/figure4_pareto_latency_energy_frontier.png) | [PDF](results/figures/figure4_pareto_latency_energy_frontier.pdf) |
+| **Figure 5** | **3D Coordinated Trajectories in Metropolis Skyscraper City**: 3D spatial plot with 20 obstacles, launch perimeter beacons, and designated stations. | [PNG (350 DPI)](results/figures/figure5_3d_metropolis_flight_trajectories.png) | [PDF](results/figures/figure5_3d_metropolis_flight_trajectories.pdf) |
 
 ---
 
-## 7. Citation & References
+## 6. Mathematical Foundations & Physics Modeling
+
+### A. Rotary-Wing Aerodynamics (Zeng et al., 2019)
+The propulsion power consumption $P(v)$ for a rotary-wing UAV flying at horizontal airspeed $v$ follows:
+$$P(v) = \underbrace{P_0 \left(1 + \frac{3v^2}{U_{\text{tip}}^2}\right)}_{\text{Blade Profile Power}} + \underbrace{P_i \left(\sqrt{1 + \frac{v^4}{4v_0^4}} - \frac{v^2}{2v_0^2}\right)^{1/2}}_{\text{Induced Power}} + \underbrace{\frac{1}{2} d_0 \rho s A v^3}_{\text{Parasite Drag Power}}$$
+
+* **Hovering Power**: $P(0) = P_0 + P_i = 79.86\,\text{W} + 88.63\,\text{W} = 168.49\,\text{W}$.
+* **Optimal Cruise Airspeed**: Aerodynamic translational lift produces an energy-minimum cruising speed at $v^* \approx 10.3\,\text{m/s}$ where power drops to $\approx 126.5\,\text{W}$ ($\approx 25\%$ energy savings over hovering).
+
+### B. Wireless OFDMA Communication
+UAVs transmit data over RF channels with pathloss exponent $\alpha = 2.0$:
+$$R_j(d_j) = \frac{B}{K_{\text{tx}}} \log_2\left(1 + \frac{P_{\text{tx}} \beta_0 d_j^{-2}}{\sigma^2}\right)$$
+where $B = 20\,\text{MHz}$, $P_{\text{tx}} = 0.1\,\text{W}$ ($20\,\text{dBm}$), $\beta_0 = -50\,\text{dB}$ at $1\,\text{m}$, and noise spectral power $\sigma^2 = -100\,\text{dBm}$.
+
+### C. Multi-Agent Reinforcement Learning Hierarchy
+1. **Hierarchical A\* + MAPPO (Proposed Hybrid)**: High-level 3D A* graph search precomputes collision-free global waypoints; low-level MAPPO neural policy tracks waypoints using 3D Pure Pursuit ($L = 12.0\,\text{m}$) while dynamically avoiding peer UAVs ($d_{\text{safe}} = 8.0\,\text{m}$) and optimizing multi-tier MEC task offloading.
+2. **APF-Assisted Residual MAPPO**: Actor outputs residual correction $\mathbf{u} = 2.0 \cdot \mathbf{u}_{\text{nom}} + 0.4 \cdot \mathbf{u}_{\text{learned}}$, utilizing nominal potential field guidance.
+3. **Pure MAPPO (CTDE)**: Dual-head actor outputs continuous velocity displacement $\Delta \mathbf{p} \in \mathbb{R}^3$ and discrete offload target $a_{\text{off}} \in \{0, \dots, N\}$. Value critic evaluates centralized global state $S \in \mathbb{R}^{10N}$.
+4. **Independent PPO (IPPO, DTDE)**: Fully decentralized actor and local critic $V_j(o_j)$ operating under partial observability.
+5. **Centralized PPO (CPPO, CTCE)**: Single centralized actor and critic outputting joint action vectors $\mathbf{a} \in \mathbb{R}^{3N}$ for the entire fleet simultaneously.
+6. **Multi-Agent DDPG (MADDPG)**: Continuous deterministic actor-critic with Gumbel-Softmax discrete relaxation and centralized continuous Q-critic $Q(S, A)$.
+
+---
+
+## 7. Citation & Defense References
 
 ```bibtex
 @article{zeng2019energy,

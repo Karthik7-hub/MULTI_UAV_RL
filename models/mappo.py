@@ -11,12 +11,20 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.distributions import Categorical, Normal
 import numpy as np
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Optional, Any
 
 class ActorNetwork(nn.Module):
-    def __init__(self, obs_dim: int, num_offload_actions: int, hidden_dim: int = 128, max_disp: float = 15.0):
+    def __init__(
+        self,
+        obs_dim: int,
+        num_offload_actions: int,
+        hidden_dim: int = 128,
+        max_disp: float = 15.0,
+        policy_variant: str = "pure"  # "pure" (Variant A) or "residual" (Variant B)
+    ):
         super().__init__()
         self.max_disp = max_disp
+        self.policy_variant = policy_variant.lower()
         self.backbone = nn.Sequential(
             nn.Linear(obs_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
@@ -31,11 +39,18 @@ class ActorNetwork(nn.Module):
         self.move_mean_head = nn.Linear(hidden_dim, 3)
         self.move_log_std = nn.Parameter(torch.zeros(3) - 0.5)
 
-    def forward(self, obs: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        features = self.backbone(obs)
-        offload_logits = self.offload_head(features)
+        # Standard MAPPO orthogonal layer initialization (zero initial directional bias)
+        for layer in self.backbone:
+            if isinstance(layer, nn.Linear):
+                nn.init.orthogonal_(layer.weight, gain=float(np.sqrt(2)))
+                nn.init.constant_(layer.bias, 0.0)
+        nn.init.orthogonal_(self.move_mean_head.weight, gain=0.01)
+        nn.init.constant_(self.move_mean_head.bias, 0.0)
+        nn.init.orthogonal_(self.offload_head.weight, gain=0.01)
+        nn.init.constant_(self.offload_head.bias, 0.0)
 
-        # Inductive goal attractor guidance toward designated station
+    def compute_nominal_apf_guidance(self, obs: torch.Tensor) -> torch.Tensor:
+        """Computes verified nominal APF controller vector with 2D cross-product directional steering."""
         station_vec = obs[:, 6:9]
         dist = torch.norm(station_vec, dim=-1, keepdim=True) * 200.0
         dir_to_station = station_vec / (torch.norm(station_vec, dim=-1, keepdim=True) + 1e-6)
@@ -46,13 +61,41 @@ class ActorNetwork(nn.Module):
         obs_vec_xy = obs[:, -3:-1]
         obs_dist = obs[:, -1:] * 50.0
         obs_dot = (dir_to_station[:, :2] * obs_vec_xy).sum(dim=-1, keepdim=True)
-        perp_xy = torch.stack([-obs_vec_xy[:, 1], obs_vec_xy[:, 0]], dim=-1)
-        avoid_weight = torch.clamp((25.0 - obs_dist) / 20.0, 0.0, 1.5) * torch.clamp(obs_dot, 0.0, 1.0)
+        
+        # 2D cross-product to detect whether obstacle is on left or right of flight path:
+        # cross > 0 means obstacle is to the LEFT -> steer RIGHT (-tangent)
+        # cross < 0 means obstacle is to the RIGHT -> steer LEFT (+tangent)
+        cross_2d = dir_to_station[:, 0:1] * obs_vec_xy[:, 1:2] - dir_to_station[:, 1:2] * obs_vec_xy[:, 0:1]
+        sign_turn = torch.where(cross_2d >= 0.0, -torch.ones_like(cross_2d), torch.ones_like(cross_2d))
+        tangent_xy = torch.stack([-obs_vec_xy[:, 1], obs_vec_xy[:, 0]], dim=-1) * sign_turn
+        
+        avoid_weight = torch.clamp((25.0 - obs_dist) / 20.0, 0.0, 1.8) * torch.clamp(obs_dot, 0.0, 1.0)
+        avoid_vector = 1.0 * tangent_xy - 0.6 * obs_vec_xy
 
-        combined_guidance = guidance.clone()
-        combined_guidance[:, :2] = combined_guidance[:, :2] + avoid_weight * perp_xy
+        # Add vertical climbing component when obstacle directly blocks horizontal path,
+        # but permit descent if the goal is below and avoid over-climbing above obstacles
+        curr_alt = obs[:, 2:3] * 200.0
+        can_climb = torch.where(dir_to_station[:, 2:3] < -0.1, torch.zeros_like(curr_alt), torch.clamp((75.0 - curr_alt) / 20.0, 0.0, 1.0))
+        climb_z = torch.clamp((25.0 - obs_dist) / 20.0, 0.0, 1.0) * torch.clamp(obs_dot, 0.0, 1.0) * 0.8 * can_climb
 
-        raw_move = self.move_mean_head(features) + 1.5 * combined_guidance
+        combined = guidance.clone()
+        combined[:, :2] = combined[:, :2] + avoid_weight * avoid_vector
+        combined[:, 2:3] = combined[:, 2:3] + climb_z
+        return combined
+
+    def forward(self, obs: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        features = self.backbone(obs)
+        offload_logits = self.offload_head(features)
+        learned_move = self.move_mean_head(features)
+
+        if self.policy_variant == "residual":
+            # Variant B: Residual RL (Nominal APF + Learned Policy Correction)
+            nominal_guidance = self.compute_nominal_apf_guidance(obs)
+            raw_move = 0.4 * learned_move + 2.0 * nominal_guidance
+        else:
+            # Variant A: Pure MAPPO (100% Neural Policy Output, Zero Injected Guidance)
+            raw_move = learned_move
+
         move_mean = torch.tanh(raw_move) * self.max_disp
         move_std = torch.exp(torch.clamp(self.move_log_std, -2.0, 0.5))
         return offload_logits, move_mean, move_std
@@ -99,6 +142,12 @@ class CriticNetwork(nn.Module):
             nn.Tanh(),
             nn.Linear(hidden_dim, 1)
         )
+        for layer in self.net:
+            if isinstance(layer, nn.Linear):
+                nn.init.orthogonal_(layer.weight, gain=float(np.sqrt(2)))
+                nn.init.constant_(layer.bias, 0.0)
+        nn.init.orthogonal_(self.net[-1].weight, gain=1.0)
+        nn.init.constant_(self.net[-1].bias, 0.0)
 
     def forward(self, state: torch.Tensor) -> torch.Tensor:
         return self.net(state)
@@ -115,9 +164,10 @@ class RolloutBuffer:
         self.reward_buf = np.zeros((num_steps,), dtype=np.float32)
         self.value_buf = np.zeros((num_steps,), dtype=np.float32)
         self.done_buf = np.zeros((num_steps,), dtype=np.float32)
+        self.term_buf = np.zeros((num_steps,), dtype=np.float32)
         self.step_idx = 0
 
-    def insert(self, obs, state, act_move, act_offload, log_prob, reward, value, done):
+    def insert(self, obs, state, act_move, act_offload, log_prob, reward, value, done, terminated: bool = False):
         t = self.step_idx
         for j in range(self.num_uavs):
             self.obs_buf[t, j] = obs[j]
@@ -128,42 +178,25 @@ class RolloutBuffer:
         self.reward_buf[t] = reward
         self.value_buf[t] = value
         self.done_buf[t] = float(done)
+        self.term_buf[t] = float(terminated)
         self.step_idx += 1
 
-    def compute_gae(self, last_val: float, gamma: float = 0.99, gae_lambda: float = 0.95):
+    def compute_gae(self, last_val: float, last_terminated: bool = False, gamma: float = 0.99, gae_lambda: float = 0.95):
         """
-        # =========================================================================
-        # PURPOSE:
-        # Calculates Generalized Advantage Estimation (GAE) and TD(lambda) Returns.
-        # Balances bias vs variance in policy gradient estimation.
-        #
-        # EQUATIONS (Schulman et al., ICLR 2016):
-        # 1. Temporal Difference (TD) Residual Error:
-        #    delta_t = r_t + gamma * V(s_{t+1}) * (1 - done_t) - V(s_t)
-        #
-        # 2. Generalized Advantage Estimate:
-        #    A_t^{GAE} = sum_{l=0}^{T-t-1} (gamma * lambda)^l * delta_{t+l}
-        #    Computed recursively backwards:
-        #    A_t = delta_t + (gamma * lambda) * (1 - done_t) * A_{t+1}
-        #
-        # 3. Discounted Target Return (for Critic Training):
-        #    R_t = A_t^{GAE} + V(s_t)
-        #
-        # VARIABLES & UNITS:
-        # - gamma      : Temporal discount factor = 0.99 (values future rewards)
-        # - gae_lambda : GAE bias-variance trade-off parameter = 0.95
-        #                (lambda=0: low variance/high bias TD(0); lambda=1: high variance/unbiased Monte Carlo)
-        # - V(s_t)     : Centralized critic value prediction at state s_t
-        # - r_t        : Scalar step reward received at timestep t
-        # - advantages : How much better action a_t was compared to average state value V(s_t)
-        # - returns    : Target values for fitting the Centralized Critic network
-        # =========================================================================
+        Calculates Generalized Advantage Estimation (GAE) and TD(lambda) Returns with proper
+        Gymnasium boundary handling: bootstraps on truncation, stops on genuine termination.
         """
         advantages = np.zeros(self.num_steps, dtype=np.float32)
         last_gae = 0.0
         for t in reversed(range(self.num_steps)):
-            next_val = last_val if t == self.num_steps - 1 else self.value_buf[t + 1]
-            next_non_terminal = 1.0 - (1.0 if t == self.num_steps - 1 else self.done_buf[t])
+            if t == self.num_steps - 1:
+                next_val = last_val
+                # If truncated by time limit, bootstrap next_val! Only zero out on genuine termination.
+                next_non_terminal = 1.0 - float(last_terminated)
+            else:
+                next_val = self.value_buf[t + 1]
+                next_non_terminal = 1.0 - self.term_buf[t]
+
             # TD error delta_t
             delta = self.reward_buf[t] + gamma * next_val * next_non_terminal - self.value_buf[t]
             # Recursive accumulation of exponentially discounted TD errors
@@ -186,6 +219,7 @@ class MAPPOAgent:
         entropy_coef: float = 0.01,
         value_coef: float = 0.5,
         max_grad_norm: float = 0.5,
+        policy_variant: str = "pure",
         device: str = "cpu"
     ):
         self.obs_dim = obs_dim
@@ -195,6 +229,7 @@ class MAPPOAgent:
         self.entropy_coef = entropy_coef
         self.value_coef = value_coef
         self.max_grad_norm = max_grad_norm
+        self.policy_variant = policy_variant.lower()
 
         from utils.device import DeviceManager
         if isinstance(device, str):
@@ -202,7 +237,12 @@ class MAPPOAgent:
         else:
             self.device = device
 
-        self.actor = ActorNetwork(obs_dim, num_offload_actions, hidden_dim).to(self.device)
+        self.actor = ActorNetwork(
+            obs_dim=obs_dim,
+            num_offload_actions=num_offload_actions,
+            hidden_dim=hidden_dim,
+            policy_variant=self.policy_variant
+        ).to(self.device)
         self.critic = CriticNetwork(state_dim, hidden_dim).to(self.device)
 
         self.actor_opt = optim.Adam(self.actor.parameters(), lr=actor_lr, eps=1e-5)
@@ -236,33 +276,24 @@ class MAPPOAgent:
             v = self.critic(t_s)
             return float(v.squeeze(0).item())
 
-    def update(self, buffer: RolloutBuffer, ppo_epochs: int = 5, batch_size: int = 64, gamma: float = 0.99, gae_lambda: float = 0.95):
+    def update(
+        self,
+        buffer: RolloutBuffer,
+        next_state: Optional[np.ndarray] = None,
+        last_terminated: bool = False,
+        ppo_epochs: int = 5,
+        batch_size: int = 64,
+        gamma: float = 0.99,
+        gae_lambda: float = 0.95
+    ):
         """
-        # =========================================================================
-        # PURPOSE:
-        # Executes mini-batch PPO policy and value network updates on collected rollout buffer.
-        #
-        # EQUATIONS:
-        # 1. Advantage Normalization:
-        #    A_norm = (A - mean(A)) / (std(A) + 1e-8)
-        #
-        # 2. Probability Ratio:
-        #    r_t(theta) = exp( log_pi_theta(a_t | o_t) - log_pi_old(a_t | o_t) )
-        #               = pi_theta(a_t | o_t) / pi_old(a_t | o_t)
-        #
-        # 3. Clipped Surrogate Policy Objective (PPO-Clip):
-        #    surr1 = r_t(theta) * A_norm
-        #    surr2 = clip(r_t(theta), 1 - epsilon, 1 + epsilon) * A_norm
-        #    L^{CLIP}(theta) = -E[ min(surr1, surr2) ] - c_entropy * H(pi_theta)
-        #    - Clipping prevents destructively large policy updates!
-        #
-        # 4. Centralized Critic MSE Value Loss:
-        #    L^{VF}(phi) = E[ (V_phi(s_t) - R_t)^2 ]
-        #    - Fits the centralized critic to predict the true expected target return R_t.
-        # =========================================================================
+        Executes mini-batch PPO policy and value network updates on collected rollout buffer.
         """
-        last_val = self.get_value(buffer.state_buf[-1])
-        adv, ret = buffer.compute_gae(last_val, gamma, gae_lambda)
+        if next_state is not None:
+            last_val = self.get_value(next_state)
+        else:
+            last_val = self.get_value(buffer.state_buf[-1])
+        adv, ret = buffer.compute_gae(last_val, last_terminated=last_terminated, gamma=gamma, gae_lambda=gae_lambda)
 
         # Normalize advantages across rollout for stable gradient magnitudes
         adv = (adv - adv.mean()) / (adv.std() + 1e-8)
@@ -324,6 +355,7 @@ class MAPPOAgent:
             "critic": self.critic.state_dict(),
             "actor_opt": self.actor_opt.state_dict(),
             "critic_opt": self.critic_opt.state_dict(),
+            "policy_variant": self.policy_variant,
         }, path)
 
     def load_checkpoint(self, path: str):
@@ -334,3 +366,6 @@ class MAPPOAgent:
             self.actor_opt.load_state_dict(ckpt["actor_opt"])
         if "critic_opt" in ckpt:
             self.critic_opt.load_state_dict(ckpt["critic_opt"])
+        if "policy_variant" in ckpt:
+            self.policy_variant = ckpt["policy_variant"]
+            self.actor.policy_variant = self.policy_variant
