@@ -599,7 +599,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Multi-Model Scientific Evaluation")
     parser.add_argument("--device", type=str, default="auto", choices=["auto", "cuda", "cpu"])
     parser.add_argument("--num_seeds", type=int, default=5, help="Number of held-out test seeds")
-    parser.add_argument("--output_dir", type=str, default="results/audit_phase_2", help="Directory to save audit evaluation results")
+    parser.add_argument("--output_dir", type=str, default="results", help="Directory to save audit evaluation results")
     parser.add_argument("--strict_ckpts", action="store_true", default=True, help="Enforce strict checkpoint presence")
     parser.add_argument("--no_strict", dest="strict_ckpts", action="store_false", help="Permit missing checkpoints")
     parser.add_argument("--no_plots", dest="save_plots", action="store_false", default=True, help="Disable plot generation")
