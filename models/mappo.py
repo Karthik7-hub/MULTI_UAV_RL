@@ -27,26 +27,50 @@ class ActorNetwork(nn.Module):
         self.max_disp = max_disp
         self.policy_variant = policy_variant.lower()
         self.enable_terminal_damping = enable_terminal_damping
-        self.backbone = nn.Sequential(
-            nn.Linear(obs_dim, hidden_dim),
+        # Two-Stream Decoupled Architecture:
+        # Schema derived from canonical 20-dim observation builder:
+        # Nav features (16 dims): pos (0:3), vel (3:6), target_vec (6:9), target_dist (9:10), peer_dists (14:17), obs_feat (17:20)
+        # Offload features (10 dims): pos (0:3), task_cycles (10), task_data (11), task_deadline (12), channel_rate (13), peer_dists (14:17)
+        self.nav_indices = list(range(0, 10)) + list(range(14, 20))
+        self.nav_dim = len(self.nav_indices) if obs_dim == 20 else obs_dim
+
+        self.offload_indices = list(range(0, 3)) + list(range(10, 17))
+        self.offload_dim = len(self.offload_indices) if obs_dim == 20 else obs_dim
+
+        # 1. Dedicated 3D Spatial Navigation Stream
+        self.nav_backbone = nn.Sequential(
+            nn.Linear(self.nav_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.Tanh(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.Tanh()
         )
-        # Discrete head for offloading decision
-        self.offload_head = nn.Linear(hidden_dim, num_offload_actions)
-        # Continuous head for 3D displacement
         self.move_mean_head = nn.Linear(hidden_dim, 3)
-        self.move_log_std = nn.Parameter(torch.zeros(3) - 0.5)
+        self.move_log_std = nn.Parameter(torch.zeros(3) - 0.2)
 
-        # Standard MAPPO orthogonal layer initialization (zero initial directional bias)
-        for layer in self.backbone:
-            if isinstance(layer, nn.Linear):
-                nn.init.orthogonal_(layer.weight, gain=float(np.sqrt(2)))
-                nn.init.constant_(layer.bias, 0.0)
-        nn.init.orthogonal_(self.move_mean_head.weight, gain=0.01)
+        # 2. Dedicated Task Offloading & MEC Stream
+        self.offload_backbone = nn.Sequential(
+            nn.Linear(self.offload_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.Tanh(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.Tanh()
+        )
+        self.offload_head = nn.Linear(hidden_dim, num_offload_actions)
+
+        # Standard orthogonal layer initialization
+        for m in self.nav_backbone:
+            if isinstance(m, nn.Linear):
+                nn.init.orthogonal_(m.weight, gain=float(np.sqrt(2)))
+                nn.init.constant_(m.bias, 0.0)
+        for m in self.offload_backbone:
+            if isinstance(m, nn.Linear):
+                nn.init.orthogonal_(m.weight, gain=float(np.sqrt(2)))
+                nn.init.constant_(m.bias, 0.0)
+
+        nn.init.orthogonal_(self.move_mean_head.weight, gain=0.4)
         nn.init.constant_(self.move_mean_head.bias, 0.0)
         nn.init.orthogonal_(self.offload_head.weight, gain=0.01)
         nn.init.constant_(self.offload_head.bias, 0.0)
@@ -80,15 +104,23 @@ class ActorNetwork(nn.Module):
         can_climb = torch.where(dir_to_station[:, 2:3] < -0.1, torch.zeros_like(curr_alt), torch.clamp((75.0 - curr_alt) / 20.0, 0.0, 1.0))
         climb_z = torch.clamp((25.0 - obs_dist) / 20.0, 0.0, 1.0) * torch.clamp(obs_dot, 0.0, 1.0) * 0.8 * can_climb
 
-        combined = guidance.clone()
-        combined[:, :2] = combined[:, :2] + avoid_weight * avoid_vector
-        combined[:, 2:3] = combined[:, 2:3] + climb_z
-        return combined
+        combined_xy = guidance[:, :2] + avoid_weight * avoid_vector
+        combined_z = guidance[:, 2:3] + climb_z
+        return torch.cat([combined_xy, combined_z], dim=-1)
 
     def forward(self, obs: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        features = self.backbone(obs)
-        offload_logits = self.offload_head(features)
-        learned_move = self.move_mean_head(features)
+        if obs.shape[-1] == 20:
+            nav_feat = obs[..., self.nav_indices]
+            offload_feat = obs[..., self.offload_indices]
+        else:
+            nav_feat = obs
+            offload_feat = obs
+
+        nav_features = self.nav_backbone(nav_feat)
+        offload_features = self.offload_backbone(offload_feat)
+
+        offload_logits = self.offload_head(offload_features)
+        learned_move = self.move_mean_head(nav_features)
 
         if self.policy_variant == "residual":
             # Variant B: Residual RL (Nominal APF + Learned Policy Correction)
@@ -109,7 +141,7 @@ class ActorNetwork(nn.Module):
             raw_move = learned_move
 
         move_mean = torch.tanh(raw_move) * self.max_disp
-        move_std = torch.exp(torch.clamp(self.move_log_std, -2.0, 0.5))
+        move_std = torch.exp(torch.clamp(self.move_log_std, -1.5, 1.5))
         return offload_logits, move_mean, move_std
 
     def sample_action(self, obs: torch.Tensor, deterministic: bool = False):
@@ -220,10 +252,11 @@ class RolloutBuffer:
         #    R_t = A_t + V(s_t)  (equivalent to empirical lambda-return)
         # =========================================================================
         """
-        advantages = np.zeros(self.num_steps, dtype=np.float32)
+        actual_steps = max(1, self.step_idx)
+        advantages = np.zeros(actual_steps, dtype=np.float32)
         last_gae = 0.0
-        for t in reversed(range(self.num_steps)):
-            if t == self.num_steps - 1:
+        for t in reversed(range(actual_steps)):
+            if t == actual_steps - 1:
                 next_val = last_val
                 # If truncated by time limit, bootstrap next_val! Only zero out on genuine termination.
                 next_non_terminal = 1.0 - float(last_terminated)
@@ -236,7 +269,7 @@ class RolloutBuffer:
             # Recursive accumulation of exponentially discounted TD errors
             last_gae = delta + gamma * gae_lambda * next_non_terminal * last_gae
             advantages[t] = last_gae
-        returns = advantages + self.value_buf
+        returns = advantages + self.value_buf[:actual_steps]
         return advantages, returns
 
 class MAPPOAgent:
@@ -350,25 +383,27 @@ class MAPPOAgent:
         #    Trained via Adam regression to match target returns R_t across global states.
         # =========================================================================
         """
+        valid_len = max(1, buffer.step_idx)
         if next_state is not None:
             last_val = self.get_value(next_state)
         else:
-            last_val = self.get_value(buffer.state_buf[-1])
+            last_val = self.get_value(buffer.state_buf[valid_len - 1])
         adv, ret = buffer.compute_gae(last_val, last_terminated=last_terminated, gamma=gamma, gae_lambda=gae_lambda)
 
         # Normalize advantages across rollout for stable gradient magnitudes
         adv = (adv - adv.mean()) / (adv.std() + 1e-8)
 
-        t_states = torch.tensor(buffer.state_buf, dtype=torch.float32, device=self.device)
+        t_states = torch.tensor(buffer.state_buf[:valid_len], dtype=torch.float32, device=self.device)
         t_returns = torch.tensor(ret, dtype=torch.float32, device=self.device)
         t_advantages = torch.tensor(adv, dtype=torch.float32, device=self.device)
 
         # Flatten observations and actions across all N UAVs
-        t_obs = torch.tensor(buffer.obs_buf, dtype=torch.float32, device=self.device).view(-1, self.obs_dim)
-        t_act_move = torch.tensor(buffer.act_move_buf, dtype=torch.float32, device=self.device).view(-1, 3)
-        t_act_offload = torch.tensor(buffer.act_offload_buf, dtype=torch.int64, device=self.device).view(-1)
-        t_old_log_probs = torch.tensor(buffer.log_prob_buf, dtype=torch.float32, device=self.device).view(-1)
+        t_obs = torch.tensor(buffer.obs_buf[:valid_len], dtype=torch.float32, device=self.device).view(-1, self.obs_dim)
+        t_act_move = torch.tensor(buffer.act_move_buf[:valid_len], dtype=torch.float32, device=self.device).view(-1, 3)
+        t_act_offload = torch.tensor(buffer.act_offload_buf[:valid_len], dtype=torch.int64, device=self.device).view(-1)
+        t_old_log_probs = torch.tensor(buffer.log_prob_buf[:valid_len], dtype=torch.float32, device=self.device).view(-1)
         flat_adv = t_advantages.unsqueeze(1).repeat(1, self.num_uavs).view(-1)
+        val_old = torch.tensor(buffer.value_buf[:valid_len], dtype=torch.float32, device=self.device)
 
         self.actor.train()
         self.critic.train()
@@ -378,6 +413,7 @@ class MAPPOAgent:
 
         for _ in range(ppo_epochs):
             np.random.shuffle(indices)
+            early_break = False
             for start in range(0, num_samples, batch_size):
                 end = start + batch_size
                 b_idx = indices[start:end]
@@ -395,19 +431,34 @@ class MAPPOAgent:
                 nn.utils.clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
                 self.actor_opt.step()
 
-            # Critic MSE regression update on global states
+                # Approximate KL divergence guard against destructive policy collapse
+                with torch.no_grad():
+                    approx_kl = ((ratio - 1.0) - torch.log(ratio + 1e-10)).mean()
+                    if approx_kl.item() > 0.05:
+                        early_break = True
+                        break
+
+            # Critic Clipped Value Loss regression update on global states
             state_idx = np.arange(len(t_states))
             np.random.shuffle(state_idx)
             for s_start in range(0, len(t_states), batch_size):
                 s_end = s_start + batch_size
                 s_b = state_idx[s_start:s_end]
                 val_pred = self.critic(t_states[s_b]).squeeze(-1)
-                critic_loss = nn.functional.mse_loss(val_pred, t_returns[s_b])
+
+                # PPO Value Clipping to prevent critic destabilization
+                val_pred_clipped = val_old[s_b] + torch.clamp(val_pred - val_old[s_b], -self.clip_eps * 20.0, self.clip_eps * 20.0)
+                vf_loss1 = (val_pred - t_returns[s_b]) ** 2
+                vf_loss2 = (val_pred_clipped - t_returns[s_b]) ** 2
+                critic_loss = 0.5 * torch.max(vf_loss1, vf_loss2).mean()
 
                 self.critic_opt.zero_grad()
                 critic_loss.backward()
                 nn.utils.clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
                 self.critic_opt.step()
+
+            if early_break:
+                break
 
     def save_checkpoint(self, path: str):
         os.makedirs(os.path.dirname(path), exist_ok=True)

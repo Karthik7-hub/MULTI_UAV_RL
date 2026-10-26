@@ -267,6 +267,12 @@ def get_preset_config(preset: str = "benchmark", num_uavs: int = 4) -> MasterCon
     cfg.airspace.preset_name = preset
     if preset in ENV_PRESETS:
         cfg.airspace.obstacles = list(ENV_PRESETS[preset])
+    if preset == "canyon":
+        # The canyon's two central 24 m-radius cylinders overlap the default
+        # 20 m north/south station ring.  Keep the obstacle geometry intact
+        # and place both the initial ring and mission stations in valid airspace.
+        cfg.physics.station_radius = 70.0
+        cfg.physics.start_radius = 90.0
     return cfg
 
 

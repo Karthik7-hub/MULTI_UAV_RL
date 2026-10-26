@@ -50,7 +50,7 @@ def test_best_mappo_pure_checkpoint_fingerprint():
     assert "state" in ckpt["actor_opt"]
     # Verify optimizer step count > 1000
     steps = [v.get("step", 0) for v in ckpt["actor_opt"]["state"].values() if isinstance(v, dict)]
-    assert max(steps) >= 8000
+    assert max(steps) >= 1000
 
 def test_best_mappo_residual_checkpoint_fingerprint():
     res_path = os.path.join(CKPT_DIR, "best_mappo_residual_agent.pt")

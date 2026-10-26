@@ -160,18 +160,23 @@ def plot_training_convergence(csv_path: str, save_path: str):
     ax.legend(loc='lower right')
     ax.grid(True, linestyle=':', alpha=0.6)
 
-    # (b) Task Completion Rate (%)
+    # (b) Task Completion vs Navigation Arrival Rate (%)
     ax = axes[0, 1]
     comp_rate = (df["completed_tasks"] / np.maximum(1, df["completed_tasks"] + df["deadline_misses"])) * 100.0
     comp_smooth = comp_rate.rolling(window, min_periods=1).mean()
-    ax.plot(df["episode"], comp_rate, color='#86efac', alpha=0.5, label='Raw Completion %')
-    ax.plot(df["episode"], comp_smooth, color='#15803d', linewidth=2.5, label='Smoothed Completion %')
+    ax.plot(df["episode"], comp_rate, color='#86efac', alpha=0.3, label='Raw Task Comp %')
+    ax.plot(df["episode"], comp_smooth, color='#15803d', linewidth=2.2, label='MEC Task Comp %')
+    if "arrival_rate" in df.columns:
+        arr_rate = df["arrival_rate"]
+        arr_smooth = arr_rate.rolling(window, min_periods=1).mean()
+        ax.plot(df["episode"], arr_rate, color='#93c5fd', alpha=0.4, label='Raw Arrival %')
+        ax.plot(df["episode"], arr_smooth, color='#0284c7', linewidth=2.5, linestyle='--', label='Nav Arrival %')
     ax.axhline(95.0, color='#e11d48', linestyle=':', label='Target Threshold (95%)')
-    ax.set_title("(b) Task Completion Rate (%)", fontsize=11, fontweight='bold')
+    ax.set_title("(b) Task Completion vs Nav Arrival (%)", fontsize=11, fontweight='bold')
     ax.set_xlabel("Training Episode")
-    ax.set_ylabel("Success Rate (%)")
-    ax.set_ylim(0, 105)
-    ax.legend(loc='lower right')
+    ax.set_ylabel("Rate (%)")
+    ax.set_ylim(-2, 105)
+    ax.legend(loc='center right', fontsize=8.5)
     ax.grid(True, linestyle=':', alpha=0.6)
 
     # (c) Fleet Total Energy (kJ)

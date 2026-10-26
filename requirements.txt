@@ -14,5 +14,8 @@ gymnasium>=0.29.0
 # Publication-Grade Visualization & Plotting (2D & 3D)
 matplotlib>=3.7.0
 
+# Interactive WebGL simulator backend
+Flask>=3.0.0
+
 # Automated Verification & Contract Test Suite
 pytest>=7.0.0

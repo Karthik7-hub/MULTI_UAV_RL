@@ -46,7 +46,8 @@ class MultiUAVEnv(gym.Env):
             f_local=self.cfg.comp.f_local,
             f_peer=self.cfg.comp.f_peer,
             f_edge=self.cfg.comp.f_edge,
-            kappa=self.cfg.comp.kappa
+            kappa=self.cfg.comp.kappa,
+            edge_background_load=self.cfg.comp.edge_background_load
         )
         self.task_gen = TaskGenerator(
             poisson_lambda=self.cfg.task.poisson_lambda,
@@ -121,11 +122,27 @@ class MultiUAVEnv(gym.Env):
         return True
 
     def _is_pos_outside_obstacles(self, p: np.ndarray, margin: float = 4.0) -> bool:
-        """Helper to verify coordinates are strictly outside all cylindrical obstacle volumes."""
+        """Helper to verify coordinates are strictly outside all cylindrical and spherical obstacle volumes."""
         for obs in self.cfg.airspace.obstacles:
-            cx, cy, r, h = obs[:4]
-            if np.linalg.norm(p[:2] - np.array([cx, cy])) < (r + margin) and p[2] <= (h + margin):
-                return False
+            if isinstance(obs, dict):
+                if obs.get("type") == "sphere":
+                    cx, cy, cz, r = obs["cx"], obs["cy"], obs["cz"], obs["radius"]
+                    if float(np.linalg.norm(p - np.array([cx, cy, cz]))) < (r + margin):
+                        return False
+                else:
+                    cx, cy, r, h = float(obs["cx"]), float(obs["cy"]), float(obs["radius"]), float(obs["height"])
+                    z_min = float(obs.get("z_min", 0.0))
+                    z_max = float(obs.get("z_max", h))
+                    if float(np.linalg.norm(p[:2] - np.array([cx, cy]))) < (r + margin) and (z_min - margin) <= p[2] <= (z_max + margin):
+                        return False
+            elif len(obs) == 5:
+                cx, cy, cz, r = obs[0], obs[1], obs[2], obs[3]
+                if float(np.linalg.norm(p - np.array([cx, cy, cz]))) < (r + margin):
+                    return False
+            else:
+                cx, cy, r, h = obs[0], obs[1], obs[2], obs[3]
+                if float(np.linalg.norm(p[:2] - np.array([cx, cy]))) < (r + margin) and p[2] <= (h + margin):
+                    return False
         return True
 
     def reset(self, seed: Optional[int] = None, scenario_mode: str = "default", curriculum_ratio: float = 1.0) -> Tuple[Dict[int, np.ndarray], np.ndarray]:
@@ -146,8 +163,9 @@ class MultiUAVEnv(gym.Env):
         self.positions = {}
         self.velocities = {}
         
-        # Determine whether to sample arbitrary long-range 3D navigation or rotated fleet
-        use_long_range = (scenario_mode in ["randomized", "nav_general"]) and (self.rng.uniform(0.0, 1.0) < 0.65)
+        # Determine whether to sample arbitrary long-range 3D navigation or ring deployment.
+        # When curriculum is active (curriculum_ratio < 1.0) or during standard training, deploy on perimeter ring.
+        use_long_range = (scenario_mode == "nav_general") or ((scenario_mode == "randomized") and (curriculum_ratio >= 1.0) and (float(self.rng.uniform(0.0, 1.0)) < 0.20))
         
         if use_long_range:
             for j in range(self.num_uavs):
@@ -370,7 +388,14 @@ class MultiUAVEnv(gym.Env):
                 peer_idx = (j + target) % self.num_uavs
                 peer_busy = peer_idx in local_executors
                 d_peer = np.linalg.norm(self.positions[j] - self.positions[peer_idx])
-                res = self.comp.compute_peer(task, d_peer, self.comm, peer_busy=peer_busy, num_concurrent_tx=total_tx_nodes)
+                res = self.comp.compute_peer(
+                    task,
+                    d_peer,
+                    self.comm,
+                    peer_busy=peer_busy,
+                    num_concurrent_tx=total_tx_nodes,
+                    peer_id=peer_idx,
+                )
                 step_comm_energy += res["energy"]
                 if "peer_energy" in res:
                     step_comp_energy += res["peer_energy"]
@@ -424,70 +449,60 @@ class MultiUAVEnv(gym.Env):
         # - R_arrival   = +80.0 milestone bonus on arrival + 30.0 fleet coordination bonus.
         # - R_proximity = Continuous penalty & tangential guidance within 12m of obstacle surface.
         # ---------------------------------------------------------------------
-        reward_task = 2.0 * tasks_completed
-        reward_deadline = -2.5 * deadline_misses
-        reward_energy = -0.001 * total_step_energy
-        reward_delay = -1.0 * total_delay
-        reward_safety = -5.0 * min(6, interventions)
+        # Multi-Objective Reward Design with Disentangled Progress & Offloading:
+        # Scale task reward so offloading (+0.2/task) does not overwhelm spatial navigation progress (+4.0 * delta_d)
+        reward_task = 0.2 * tasks_completed
+        reward_deadline = -0.5 * deadline_misses
+        reward_energy = -0.0002 * total_step_energy
+        reward_delay = -0.2 * total_delay
+        reward_safety = -2.0 * min(4, interventions)
 
         reward_progress = 0.0
         reward_station = 0.0
         reward_loiter = 0.0
         reward_arrival = 0.0
         reward_proximity = 0.0
+        reward_distance = 0.0
 
         uavs_on_station = 0
         for j in range(self.num_uavs):
             curr_d = float(np.linalg.norm(self.positions[j] - self.stations[j]))
             if hasattr(self, "_prev_d_stations") and j in self._prev_d_stations:
                 progress = self._prev_d_stations[j] - curr_d
-                # Proportional progress shaping (reward moving closer, penalize retreating)
+                # Strictly potential-based progress shaping: +4.0 * delta d
                 reward_progress += 4.0 * progress
 
-            # Goal Arrival Milestone Bonus: +80.0 awarded at the instant of arrival
+            # Continuous distance penalty to discourage wandering or hovering far from goal
+            reward_distance -= 0.02 * (curr_d / 20.0)
+
+            # Goal Arrival Milestone Bonus: +50.0 awarded at the instant of arrival
             if self.arrival_steps[j] is not None and self.arrival_steps[j] == self.current_step:
-                reward_arrival += 80.0
+                reward_arrival += 50.0
 
             if curr_d <= p_cfg.reach_tolerance:
                 uavs_on_station += 1
-                reward_station += 5.0  # Station keeping reward
+                reward_station += 2.0  # Station keeping reward
                 # Anti-loitering: penalize high residual velocity when at station
                 if speeds[j] > 1.5:
-                    reward_loiter -= 2.0 * (speeds[j] / p_cfg.v_max)
+                    reward_loiter -= 0.5 * (speeds[j] / p_cfg.v_max)
                 else:
-                    reward_station += 2.0  # Precision station holding bonus
-            else:
-                reward_progress -= 0.5 * (curr_d / 20.0)
+                    reward_station += 1.0  # Precision station holding bonus
 
-            # Boundary proximity penalty: penalize approaching airspace walls (< 15m)
+            # Airspace boundary proximity penalty (< 15m)
             p_j = self.positions[j]
             d_wall = min(
                 p_j[0] - self.cfg.airspace.x_min, self.cfg.airspace.x_max - p_j[0],
                 p_j[1] - self.cfg.airspace.y_min, self.cfg.airspace.y_max - p_j[1]
             )
             if d_wall < 15.0:
-                reward_safety -= 3.0 * (15.0 - max(0.0, d_wall)) / 15.0
+                reward_safety -= 1.5 * (15.0 - max(0.0, d_wall)) / 15.0
 
-            # Smooth obstacle proximity penalty & tangential evasion guidance
+            # Smooth obstacle proximity penalty (< 10m from obstacle surface)
             for cx, cy, r, h in self.cfg.airspace.obstacles:
                 d_c = float(np.linalg.norm(self.positions[j][:2] - np.array([cx, cy])))
                 d_surf = d_c - r
-                if self.positions[j][2] <= h + 5.0 and d_surf < 12.0:
-                    reward_proximity -= 2.0 * (12.0 - max(0.0, d_surf)) / 12.0
-                    
-                    # Reward tangential velocity & vertical climb when obstacle blocks target
-                    obs_dir = (self.positions[j][:2] - np.array([cx, cy])) / max(1e-4, d_c)
-                    target_disp = self.stations[j][:2] - self.positions[j][:2]
-                    target_dist = float(np.linalg.norm(target_disp))
-                    if target_dist > 1e-4:
-                        target_dir = target_disp / target_dist
-                        # If moving towards the obstacle
-                        if float(np.dot(-obs_dir, target_dir)) > 0.2:
-                            perp_dir = np.array([-obs_dir[1], obs_dir[0]])
-                            v_tan = abs(float(np.dot(self.velocities[j][:2], perp_dir)))
-                            reward_progress += 1.2 * min(2.0, v_tan / 5.0)
-                            if self.positions[j][2] < h + 10.0 and self.velocities[j][2] > 0.5:
-                                reward_progress += 1.2 * min(2.0, self.velocities[j][2] / 5.0)
+                if self.positions[j][2] <= h + 5.0 and d_surf < 10.0:
+                    reward_proximity -= 1.5 * (10.0 - max(0.0, d_surf)) / 10.0
 
         # Coordinated Fleet Mission Bonus when all UAVs reach designated stations
         if all(self.arrival_steps[k] is not None for k in range(self.num_uavs)):
@@ -496,7 +511,7 @@ class MultiUAVEnv(gym.Env):
 
         reward = (reward_task + reward_deadline + reward_energy + reward_delay +
                   reward_safety + reward_progress + reward_station + reward_loiter +
-                  reward_arrival + reward_proximity)
+                  reward_arrival + reward_proximity + reward_distance)
 
         # Cache distances for next step progress calculation
         self._prev_d_stations = {j: float(np.linalg.norm(self.positions[j] - self.stations[j])) for j in range(self.num_uavs)}
@@ -528,6 +543,7 @@ class MultiUAVEnv(gym.Env):
             "total_delay": total_delay,
             "uavs_on_station": uavs_on_station,
             "all_arrived": all_arrived,
+            "arrival_rate": float(sum(1 for a in self.arrival_steps.values() if a is not None) / self.num_uavs * 100.0),
             "arrival_steps": dict(self.arrival_steps),
             "arrival_times": dict(self.arrival_times),
             "energy_to_goal": dict(self.energy_to_goal),
@@ -556,7 +572,8 @@ class MultiUAVEnv(gym.Env):
                 "station": reward_station,
                 "loiter": reward_loiter,
                 "arrival": reward_arrival,
-                "proximity": reward_proximity
+                "proximity": reward_proximity,
+                "distance": reward_distance
             }
         }
         return self._get_observations(), self._get_global_state(), reward, done, info

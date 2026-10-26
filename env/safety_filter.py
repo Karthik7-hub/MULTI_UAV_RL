@@ -122,6 +122,50 @@ class SafetyFilter:
             return True, max(0.0, float(t1))
         return False, 1.0
 
+    @staticmethod
+    def _relative_trajectory_collision(
+        start_a: np.ndarray,
+        end_a: np.ndarray,
+        start_b: np.ndarray,
+        end_b: np.ndarray,
+        min_separation: float,
+    ) -> Tuple[bool, float]:
+        """Return whether two simultaneous line segments breach separation.
+
+        Relative motion turns the two-UAV problem into a segment from
+        ``start_a - start_b`` to ``end_a - end_b`` around the origin.  The
+        first root of the separation sphere gives the latest safe fraction of
+        the proposed movement.
+        """
+        relative_start = np.asarray(start_a, dtype=np.float32) - np.asarray(start_b, dtype=np.float32)
+        relative_delta = (
+            np.asarray(end_a, dtype=np.float32)
+            - np.asarray(end_b, dtype=np.float32)
+            - relative_start
+        )
+        delta_sq = float(np.dot(relative_delta, relative_delta))
+
+        if delta_sq < 1e-12:
+            return float(np.linalg.norm(relative_start)) < min_separation, 0.0
+
+        t_closest = float(np.clip(-np.dot(relative_start, relative_delta) / delta_sq, 0.0, 1.0))
+        closest = relative_start + t_closest * relative_delta
+        if float(np.linalg.norm(closest)) >= min_separation:
+            return False, 1.0
+
+        start_distance = float(np.linalg.norm(relative_start))
+        if start_distance <= min_separation:
+            return True, 0.0
+
+        b_term = float(2.0 * np.dot(relative_start, relative_delta))
+        c_term = float(np.dot(relative_start, relative_start) - min_separation ** 2)
+        discriminant = b_term ** 2 - 4.0 * delta_sq * c_term
+        if discriminant <= 0.0:
+            return True, t_closest
+
+        t_entry = (-b_term - np.sqrt(discriminant)) / (2.0 * delta_sq)
+        return True, float(np.clip(t_entry, 0.0, 1.0))
+
     def filter_trajectories(
         self,
         proposed_positions: Dict[int, np.ndarray],
@@ -230,30 +274,63 @@ class SafetyFilter:
                 break
 
         # ---------------------------------------------------------------------
-        # 2. Inter-UAV Separation Preservation (Continuous & Endpoint)
+        # 2. Inter-UAV Separation Preservation (Continuous relative motion)
         # ---------------------------------------------------------------------
+        # Clamp first so the peer check evaluates the positions that will
+        # actually be applied, rather than an out-of-bounds intermediate.
         for j in range(num_uavs):
-            for k in range(j + 1, num_uavs):
-                p_j = filtered[j]
-                p_k = filtered[k]
-                dist = float(np.linalg.norm(p_j - p_k))
+            filtered[j][0] = np.clip(filtered[j][0], self.x_min, self.x_max)
+            filtered[j][1] = np.clip(filtered[j][1], self.y_min, self.y_max)
+            filtered[j][2] = np.clip(filtered[j][2], self.z_min, self.z_max)
 
-                if dist < self.d_safe:
-                    proposed_collisions += 1
-                    if enable_filter:
-                        interventions += 1
-                        overlap = self.d_safe - dist
-                        if dist > 1e-4:
-                            direction = (p_j - p_k) / dist
-                        else:
-                            prev_dir = current_positions[j] - current_positions[k]
-                            prev_d = float(np.linalg.norm(prev_dir))
-                            direction = (prev_dir / prev_d) if prev_d > 1e-4 else np.array([1.0, 0.0, 0.0], dtype=np.float32)
+        max_peer_passes = 3 if enable_filter else 1
+        for pass_idx in range(max_peer_passes):
+            any_peer_intervention = False
+            for j in range(num_uavs):
+                for k in range(j + 1, num_uavs):
+                    collides, t_entry = self._relative_trajectory_collision(
+                        current_positions[j], filtered[j], current_positions[k], filtered[k], self.d_safe
+                    )
+                    if not collides:
+                        continue
 
-                        filtered[j] += 0.5 * overlap * direction
-                        filtered[k] -= 0.5 * overlap * direction
-                    else:
+                    if pass_idx == 0:
+                        proposed_collisions += 1
+
+                    if not enable_filter:
                         actual_collisions += 1
+                        continue
+
+                    interventions += 1
+                    any_peer_intervention = True
+                    initial_sep = float(np.linalg.norm(current_positions[j] - current_positions[k]))
+
+                    if initial_sep >= self.d_safe - 1e-6:
+                        # Stop both UAVs immediately before their first
+                        # separation-boundary crossing.  This also catches
+                        # endpoint-safe swaps, which endpoint-only checks miss.
+                        safe_t = max(0.0, t_entry - 1e-3)
+                        filtered[j] = current_positions[j] + safe_t * (filtered[j] - current_positions[j])
+                        filtered[k] = current_positions[k] + safe_t * (filtered[k] - current_positions[k])
+                    else:
+                        # A caller may already provide an unsafe state.  That
+                        # past collision cannot be undone, but the resulting
+                        # positions are projected back to the separation shell.
+                        p_j = filtered[j]
+                        p_k = filtered[k]
+                        endpoint_sep = float(np.linalg.norm(p_j - p_k))
+                        if endpoint_sep > 1e-6:
+                            direction = (p_j - p_k) / endpoint_sep
+                        else:
+                            initial_dir = current_positions[j] - current_positions[k]
+                            initial_norm = float(np.linalg.norm(initial_dir))
+                            direction = initial_dir / initial_norm if initial_norm > 1e-6 else np.array([1.0, 0.0, 0.0], dtype=np.float32)
+                        midpoint = 0.5 * (p_j + p_k)
+                        filtered[j] = midpoint + 0.5 * self.d_safe * direction
+                        filtered[k] = midpoint - 0.5 * self.d_safe * direction
+
+            if not any_peer_intervention:
+                break
 
         # ---------------------------------------------------------------------
         # 3. Airspace Geofence Containment
@@ -278,3 +355,43 @@ class SafetyFilter:
     ) -> Tuple[Dict[int, np.ndarray], int, Dict[str, int]]:
         filtered, interventions = self.filter_trajectories(proposed_positions, current_positions, enable_filter=enable_filter)
         return filtered, interventions, self.last_stats
+
+def compute_min_clearance(pos: np.ndarray, obstacles: list, margin: float = 2.0) -> float:
+    """Computes continuous surface clearance to all cylindrical and spherical obstacles."""
+    clearances = []
+    for obs in obstacles:
+        is_sphere = obs.get("type") == "sphere" if isinstance(obs, dict) else len(obs) == 5
+        if is_sphere:
+            cx, cy, cz, r = obs["cx"], obs["cy"], obs["cz"], obs["radius"] if isinstance(obs, dict) else (obs[0], obs[1], obs[2], obs[3])
+            d_3d = float(np.linalg.norm(pos - np.array([cx, cy, cz])))
+            clearances.append(d_3d - (r + margin))
+        else:
+            if isinstance(obs, dict):
+                cx, cy, r, h = float(obs["cx"]), float(obs["cy"]), float(obs["radius"]), float(obs["height"])
+                z_min_obs = float(obs.get("z_min", 0.0))
+                z_max_obs = float(obs.get("z_max", h))
+            else:
+                cx, cy, r, h = float(obs[0]), float(obs[1]), float(obs[2]), float(obs[3])
+                z_min_obs = 0.0
+                z_max_obs = h
+
+            d_xy = float(np.linalg.norm(pos[:2] - np.array([cx, cy])))
+            delta_xy = max(0.0, d_xy - r)
+            if pos[2] > z_max_obs:
+                delta_z = pos[2] - z_max_obs
+            elif pos[2] < z_min_obs:
+                delta_z = z_min_obs - pos[2]
+            else:
+                delta_z = 0.0
+
+            if delta_xy > 0.0 and delta_z > 0.0:
+                d_surface = np.sqrt(delta_xy**2 + delta_z**2)
+            elif delta_xy > 0.0:
+                d_surface = delta_xy
+            elif delta_z > 0.0:
+                d_surface = delta_z
+            else:
+                d_surface = -min(r - d_xy, pos[2] - z_min_obs, z_max_obs - pos[2])
+
+            clearances.append(float(d_surface - margin))
+    return float(min(clearances)) if clearances else 50.0

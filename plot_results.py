@@ -23,6 +23,7 @@ from env.multi_uav_env import MultiUAVEnv
 from env.aerodynamics import AerodynamicsModel
 from plots.plot_curves import (
     plot_training_convergence,
+    plot_all_marl_training_convergence,
     plot_aerodynamic_power_curve,
     plot_offload_distribution_stacked,
     plot_pareto_latency_energy,
@@ -50,6 +51,16 @@ def regenerate_all_figures():
     if os.path.exists(log_mappo):
         conv_path = os.path.join(fig_dir, "training_convergence_curves.png")
         plot_training_convergence(log_mappo, conv_path)
+
+    # 2b. Multi-Algorithm MARL Comparison Curves
+    csv_dict = {
+        "mappo": os.path.join(res_dir, "training_logs_mappo_pure.csv") if os.path.exists(os.path.join(res_dir, "training_logs_mappo_pure.csv")) else log_mappo,
+        "ippo": os.path.join(res_dir, "training_logs_ippo_pure.csv") if os.path.exists(os.path.join(res_dir, "training_logs_ippo_pure.csv")) else os.path.join(res_dir, "logs", "training_logs_ippo.csv"),
+        "maddpg": os.path.join(res_dir, "training_logs_maddpg_pure.csv") if os.path.exists(os.path.join(res_dir, "training_logs_maddpg_pure.csv")) else os.path.join(res_dir, "logs", "training_logs_maddpg.csv"),
+        "cppo": os.path.join(res_dir, "training_logs_cppo.csv") if os.path.exists(os.path.join(res_dir, "training_logs_cppo.csv")) else os.path.join(res_dir, "logs", "training_logs_cppo.csv")
+    }
+    marl_conv_path = os.path.join(fig_dir, "marl_training_convergence_comparison.png")
+    plot_all_marl_training_convergence(csv_dict, marl_conv_path)
 
     # 3. Benchmark Summary & Pareto Curve
     bench_csv = os.path.join(res_dir, "benchmark_summary.csv")

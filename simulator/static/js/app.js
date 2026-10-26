@@ -113,8 +113,15 @@ let cageGroup = null;
 const ALGO_COLORS = {
     'hybrid_astar_mappo': 0x1D4ED8,  // Royal Blue
     'astar':              0xDC2626,  // Crimson Red
-    'mappo_residual':     0xD97706,  // Amber
-    'mappo_pure':         0x8B5CF6   // Vibrant Violet
+    'rrt_star':           0x16A34A,  // Forest Green
+    'sapf':               0xD97706,  // Amber
+    'mappo_residual':     0xEA580C,  // Deep Orange
+    'mappo_pure':         0x8B5CF6,  // Vibrant Violet
+    'ippo_residual':      0x0D9488,  // Dark Teal
+    'ippo_pure':          0x06B6D4,  // Cyan
+    'maddpg_residual':    0xEC4899,  // Pink
+    'maddpg_pure':        0xF43F5E,  // Rose
+    'cppo':               0x6366F1   // Indigo
 };
 
 // Coordinate Mapping: Simulator (X, Y, Z_altitude) -> Three.js (X, Z_altitude_up, Y_depth)
@@ -847,8 +854,15 @@ function updatePlannerBadgeUI() {
     const names = {
         'hybrid_astar_mappo': 'Hierarchical A* + MAPPO',
         'astar': '3D A* Baseline',
+        'rrt_star': '3D RRT* (Optimal Tree)',
+        'sapf': '3D SAPF (Adaptive Field)',
         'mappo_residual': 'APF-Residual MAPPO',
         'mappo_pure': 'Pure MAPPO Policy',
+        'ippo_residual': 'IPPO Residual',
+        'ippo_pure': 'IPPO Pure',
+        'maddpg_residual': 'MADDPG Residual',
+        'maddpg_pure': 'MADDPG Pure',
+        'cppo': 'Centralized PPO (CPPO)',
         'compare_all': 'Comparative Benchmark'
     };
     const name = names[state.activePlanner] || state.activePlanner;
@@ -904,25 +918,25 @@ function updateDecisionInspector(stepIdx) {
     }
 
     // 5. Decision Explanation Subviews
-    const isAStar = state.activePlanner === 'astar';
+    const isTreeSearch = (state.activePlanner === 'astar' || state.activePlanner === 'rrt_star');
     const astarView = document.getElementById('inspector-astar-view');
     const rlView = document.getElementById('inspector-rl-view');
-    if (astarView) astarView.style.display = isAStar ? 'block' : 'none';
-    if (rlView) rlView.style.display = isAStar ? 'none' : 'block';
+    if (astarView) astarView.style.display = isTreeSearch ? 'block' : 'none';
+    if (rlView) rlView.style.display = isTreeSearch ? 'none' : 'block';
 
-    if (isAStar) {
+    if (isTreeSearch) {
         if (exp.g_cost !== undefined) document.getElementById('astar-g').innerText = exp.g_cost.toFixed(1);
         if (exp.h_cost !== undefined) document.getElementById('astar-h').innerText = exp.h_cost.toFixed(1);
         if (exp.f_cost !== undefined) document.getElementById('astar-f').innerText = exp.f_cost.toFixed(1);
         if (exp.direction_chosen) {
             document.getElementById('astar-decision-note').innerText =
-                `${exp.direction_chosen} | Explored: ${exp.explored_nodes_count || 0} frontier nodes`;
+                `${exp.direction_chosen} | Explored: ${exp.explored_nodes_count || 0} tree/frontier nodes`;
         }
     } else {
-        const isResidual = state.activePlanner === 'mappo_residual';
+        const hasNominal = Boolean(exp.apf_nominal);
         const apfRow = document.getElementById('row-apf-nom');
-        if (apfRow) apfRow.style.display = isResidual ? 'flex' : 'none';
-        if (isResidual && exp.apf_nominal) {
+        if (apfRow) apfRow.style.display = hasNominal ? 'flex' : 'none';
+        if (hasNominal && exp.apf_nominal) {
             document.getElementById('val-apf-nom').innerText =
                 `[${formatFloat(exp.apf_nominal[0])}, ${formatFloat(exp.apf_nominal[1])}, ${formatFloat(exp.apf_nominal[2])}]`;
         }
@@ -1128,6 +1142,42 @@ function setupEventListeners() {
         renderWorldEntities();
         runPlanning();
     });
+
+    // Mission Endpoints Randomize Button
+    const btnRandom = document.getElementById('btn-random-endpoints');
+    if (btnRandom) {
+        btnRandom.addEventListener('click', async () => {
+            try {
+                btnRandom.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Randomizing...';
+                const activeObstacles = state.world.obstacles.filter(o => o.enabled !== false);
+                const res = await fetch('/api/random_endpoints', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        obstacles: activeObstacles,
+                        margin: state.world.margin
+                    })
+                });
+                const data = await res.json();
+                if (data.source && data.target) {
+                    state.world.source = data.source;
+                    state.world.target = data.target;
+                    document.getElementById('src-x').value = data.source[0];
+                    document.getElementById('src-y').value = data.source[1];
+                    document.getElementById('src-z').value = data.source[2];
+                    document.getElementById('tgt-x').value = data.target[0];
+                    document.getElementById('tgt-y').value = data.target[1];
+                    document.getElementById('tgt-z').value = data.target[2];
+                    renderWorldEntities();
+                    runPlanning();
+                }
+            } catch (err) {
+                console.error('Error randomizing endpoints:', err);
+            } finally {
+                btnRandom.innerHTML = '<i class="fa-solid fa-shuffle"></i> Randomize';
+            }
+        });
+    }
 
     // Visualization Layer Toggles
     document.getElementById('chk-show-path').addEventListener('change', (e) => {

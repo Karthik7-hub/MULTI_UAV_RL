@@ -160,20 +160,28 @@ class ComputationManager:
         distance: float,
         comm: WirelessChannelModel,
         peer_busy: bool = False,
-        num_concurrent_tx: int = 1
+        num_concurrent_tx: int = 1,
+        peer_id: Optional[int] = None,
     ) -> Dict[str, float]:
-        """Evaluates cooperative peer-to-peer offloading to an adjacent UAV."""
+        """Evaluates cooperative peer-to-peer offloading to an adjacent UAV.
+
+        ``peer_queues`` are keyed by the receiving UAV because they represent
+        work waiting for that UAV's processor.  ``peer_id`` is optional for
+        backwards compatibility with direct callers that do not identify a
+        receiver explicitly.
+        """
         r = comm.data_rate(distance, num_concurrent=num_concurrent_tx)
         t_tx = task.data_size / max(1e3, r)
         e_tx = comm.tx_power * t_tx
         eff_f = self.f_peer / (2.0 if peer_busy else 1.0)
-        q_cycles = self.peer_queues.get(task.uav_id, 0.0)
+        queue_owner = task.uav_id if peer_id is None else int(peer_id)
+        q_cycles = self.peer_queues.get(queue_owner, 0.0)
         t_wait = q_cycles / eff_f
         t_comp = task.cycles / eff_f
         e_comp = self.kappa * (eff_f ** 2) * task.cycles
         total_delay = t_tx + t_wait + t_comp
 
-        self.peer_queues[task.uav_id] = q_cycles + task.cycles
+        self.peer_queues[queue_owner] = q_cycles + task.cycles
         return {"t_tx": t_tx, "t_wait": t_wait, "t_comp": t_comp, "total_delay": total_delay, "energy": e_tx, "peer_energy": e_comp}
 
     def compute_edge(

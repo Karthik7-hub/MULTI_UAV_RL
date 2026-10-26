@@ -30,8 +30,14 @@ class MADDPGActor(nn.Module):
         super().__init__()
         self.max_disp = max_disp
         self.policy_variant = policy_variant.lower()
-        self.backbone = nn.Sequential(
-            nn.Linear(obs_dim, hidden_dim),
+        # Two-Stream Decoupled Architecture for MADDPG:
+        self.nav_indices = list(range(0, 10)) + list(range(14, 20))
+        self.nav_dim = len(self.nav_indices) if obs_dim == 20 else obs_dim
+        self.offload_indices = list(range(0, 3)) + list(range(10, 17))
+        self.offload_dim = len(self.offload_indices) if obs_dim == 20 else obs_dim
+
+        self.nav_backbone = nn.Sequential(
+            nn.Linear(self.nav_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
@@ -39,6 +45,15 @@ class MADDPGActor(nn.Module):
             nn.ReLU()
         )
         self.move_head = nn.Linear(hidden_dim, 3)
+
+        self.offload_backbone = nn.Sequential(
+            nn.Linear(self.offload_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU()
+        )
         self.offload_head = nn.Linear(hidden_dim, num_offload_actions)
 
     def compute_nominal_apf_guidance(self, obs: torch.Tensor) -> torch.Tensor:
@@ -66,14 +81,20 @@ class MADDPGActor(nn.Module):
         can_climb = torch.where(dir_to_station[:, 2:3] < -0.1, torch.zeros_like(curr_alt), torch.clamp((75.0 - curr_alt) / 20.0, 0.0, 1.0))
         climb_z = torch.clamp((25.0 - obs_dist) / 20.0, 0.0, 1.0) * torch.clamp(obs_dot, 0.0, 1.0) * 0.8 * can_climb
 
-        combined = guidance.clone()
-        combined[:, :2] = combined[:, :2] + avoid_weight * avoid_vector
-        combined[:, 2:3] = combined[:, 2:3] + climb_z
-        return combined
+        combined_xy = guidance[:, :2] + avoid_weight * avoid_vector
+        combined_z = guidance[:, 2:3] + climb_z
+        return torch.cat([combined_xy, combined_z], dim=-1)
 
     def forward(self, obs: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        feat = self.backbone(obs)
-        learned_move = self.move_head(feat)
+        if obs.shape[-1] == 20:
+            nav_feat = obs[..., self.nav_indices]
+            offload_feat = obs[..., self.offload_indices]
+        else:
+            nav_feat = obs
+            offload_feat = obs
+        nav_h = self.nav_backbone(nav_feat)
+        offload_h = self.offload_backbone(offload_feat)
+        learned_move = self.move_head(nav_h)
 
         if self.policy_variant == "residual":
             nominal_guidance = self.compute_nominal_apf_guidance(obs)
@@ -82,7 +103,7 @@ class MADDPGActor(nn.Module):
             raw_move = learned_move
 
         move = torch.tanh(raw_move) * self.max_disp
-        offload_logits = self.offload_head(feat)
+        offload_logits = self.offload_head(offload_h)
         return move, offload_logits
 
 class MADDPGCritic(nn.Module):
@@ -116,7 +137,7 @@ class ReplayBuffer:
         self.idx = 0
         self.size = 0
 
-    def add(self, state, obs, act, reward, next_state, next_obs, done):
+    def add(self, state, obs, act, reward, next_state, next_obs, done, terminated: bool = False):
         self.state_buf[self.idx] = state
         self.next_state_buf[self.idx] = next_state
         for j in range(self.num_uavs):
@@ -124,7 +145,8 @@ class ReplayBuffer:
             self.next_obs_buf[self.idx, j] = next_obs[j]
             self.act_buf[self.idx, j] = act[j]
         self.reward_buf[self.idx] = reward
-        self.done_buf[self.idx] = float(done)
+        # Use genuine termination mask to prevent time-limit truncation bias
+        self.done_buf[self.idx] = float(terminated)
         self.idx = (self.idx + 1) % self.capacity
         self.size = min(self.size + 1, self.capacity)
 
@@ -151,7 +173,7 @@ class MADDPGAgent:
         actor_lr: float = 3e-4,
         critic_lr: float = 1e-3,
         gamma: float = 0.99,
-        tau: float = 0.01,
+        tau: float = 0.005,
         noise_std: float = 0.1,
         buffer_capacity: int = 50000,
         policy_variant: str = "pure",
@@ -253,11 +275,12 @@ class MADDPGAgent:
             next_acts = []
             for j in range(self.num_uavs):
                 n_m, n_o = self.actor_target(next_obs[:, j])
-                n_o_prob = F.gumbel_softmax(n_o, tau=1.0, hard=True)
+                # Deterministic target offloading action to reduce Bellman target variance
+                n_o_prob = F.one_hot(torch.argmax(n_o, dim=-1), num_classes=self.num_offload_actions).float()
                 next_acts.append(torch.cat([n_m, n_o_prob], dim=-1))
             flat_next_acts = torch.cat(next_acts, dim=-1)
             target_q = self.critic_target(next_states, flat_next_acts).squeeze(-1)
-            # TD Target y
+            # TD Target y using genuine termination mask
             y = rewards + (1.0 - dones) * self.gamma * target_q
 
         flat_acts = actions.view(batch_size, -1)
@@ -266,22 +289,33 @@ class MADDPGAgent:
 
         self.critic_opt.zero_grad()
         critic_loss.backward()
+        nn.utils.clip_grad_norm_(self.critic.parameters(), 1.0)
         self.critic_opt.step()
 
         # ---------------------------------------------------------------------
         # 2. Update Decentralized Actor (Deterministic Policy Gradient)
         # ---------------------------------------------------------------------
+        # Freeze critic parameters to prevent gradient accumulation into critic
+        for p in self.critic.parameters():
+            p.requires_grad = False
+
         pred_acts = []
         for j in range(self.num_uavs):
             p_m, p_o = self.actor(obs[:, j])
-            p_o_prob = F.gumbel_softmax(p_o, tau=1.0, hard=True)
+            # Differentiable continuous relaxation during actor backward
+            p_o_prob = F.gumbel_softmax(p_o, tau=1.0, hard=False)
             pred_acts.append(torch.cat([p_m, p_o_prob], dim=-1))
         flat_pred_acts = torch.cat(pred_acts, dim=-1)
         actor_loss = -self.critic(states, flat_pred_acts).mean()
 
         self.actor_opt.zero_grad()
         actor_loss.backward()
+        nn.utils.clip_grad_norm_(self.actor.parameters(), 1.0)
         self.actor_opt.step()
+
+        # Unfreeze critic parameters for next step
+        for p in self.critic.parameters():
+            p.requires_grad = True
 
         # ---------------------------------------------------------------------
         # 3. Polyak Soft Target Updates

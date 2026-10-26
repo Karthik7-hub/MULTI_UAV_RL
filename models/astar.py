@@ -8,6 +8,9 @@ import heapq
 import time
 import numpy as np
 from typing import Dict, List, Tuple, Any, Optional
+from env.safety_filter import SafetyFilter
+from env.observation_builder import build_single_uav_obs
+from env.safety_filter import compute_min_clearance
 
 class GeometricDetourPlanner:
     """
@@ -603,21 +606,47 @@ class HybridAStarMAPPONavigator:
     """
     def __init__(
         self,
-        env: Any,
+        env: Optional[Any] = None,
         mappo_agent: Optional[Any] = None,
-        lookahead: float = 12.0,
+        obstacles: Optional[list] = None,
+        bounds: Tuple[float, float, float, float, float, float] = (0.0, 200.0, 0.0, 200.0, 0.0, 100.0),
+        lookahead: float = 10.0,
         residual_weight: float = 0.0,
-        apply_terminal_damping: bool = True
+        apply_terminal_damping: bool = True,
+        d_safe: float = 3.0,
+        obstacle_margin: float = 2.0,
+        v_max: float = 15.0,
+        delta_t: float = 1.0,
+        reach_tolerance: float = 5.0
     ):
         self.env = env
         self.mappo_agent = mappo_agent
         self.lookahead = lookahead
         self.residual_weight = residual_weight
         self.apply_terminal_damping = apply_terminal_damping
+        self.bounds = bounds
+        self.d_safe = d_safe
+        self.margin = obstacle_margin
+        self.v_max = v_max
+        self.delta_t = delta_t
+        self.reach_tolerance = reach_tolerance
         self.controllers = {}
-        self.raw_obs = env.cfg.airspace.obstacles
-        self.margin = env.cfg.physics.obstacle_margin
-        self.reset()
+
+        if env is not None:
+            self.raw_obs = env.cfg.airspace.obstacles
+            self.bounds = (
+                env.cfg.airspace.x_min, env.cfg.airspace.x_max,
+                env.cfg.airspace.y_min, env.cfg.airspace.y_max,
+                env.cfg.airspace.z_min, env.cfg.airspace.z_max
+            )
+            self.d_safe = env.cfg.physics.d_safe
+            self.margin = env.cfg.physics.obstacle_margin
+            self.v_max = env.cfg.physics.v_max
+            self.delta_t = env.cfg.physics.delta_t
+            self.reach_tolerance = env.cfg.physics.reach_tolerance
+            self.reset()
+        else:
+            self.raw_obs = obstacles or []
 
     def reset(self):
         self.controllers = {}
@@ -654,30 +683,27 @@ class HybridAStarMAPPONavigator:
         for j in range(self.env.num_uavs):
             curr_pos = self.env.positions[j]
             next_pos, cmd_vel, wp_idx, status = self.controllers[j].step(curr_pos, dt=dt)
-            
-            # Default nominal velocity from Pure Pursuit waypoint corridor tracker
             final_vel = cmd_vel.copy()
             offload_choice = self.env.num_uavs
-            
+
             if self.mappo_agent is not None:
                 import torch
                 t_obs = torch.tensor(obs[j], dtype=torch.float32, device=self.mappo_agent.device).unsqueeze(0)
                 with torch.no_grad():
                     act_move, act_off, _ = self.mappo_agent.actor.sample_action(t_obs, deterministic=True)
                 offload_choice = int(act_off.squeeze(0).cpu().item())
-                
-                # Causal RL Residual Navigation Coupling:
-                # If residual_weight > 0.0, blend the learned continuous RL action into the nominal Pure Pursuit command
+
+                # Causal RL Residual Navigation:
+                # residual_weight affects ONLY movement command, NOT offloading!
                 if self.residual_weight > 0.0:
                     rl_vel = act_move.squeeze(0).cpu().numpy().astype(np.float32)
                     dist_to_goal = float(np.linalg.norm(self.env.stations[j] - curr_pos))
-                    
+
                     if self.apply_terminal_damping:
-                        # Smoothly damp out residual perturbations within goal acceptance radius
                         damping = float(np.clip((dist_to_goal - reach_tol * 0.7) / (reach_tol * 1.5), 0.0, 1.0))
                     else:
                         damping = 1.0
-                        
+
                     combined_vel = cmd_vel + self.residual_weight * damping * rl_vel
                     speed = float(np.linalg.norm(combined_vel))
                     if speed > v_max:
@@ -685,12 +711,335 @@ class HybridAStarMAPPONavigator:
                     else:
                         final_vel = combined_vel
 
-            # Continuous movement displacement
             move_disp = final_vel * dt
-            
             actions[j] = {
                 "move": np.clip(move_disp, -v_max, v_max).astype(np.float32),
                 "offload": offload_choice
             }
         return actions
+
+
+    def simulate_trajectory(
+
+        self,
+
+        start: np.ndarray,
+
+        target: np.ndarray,
+
+        obstacles: Optional[list] = None,
+
+        bounds: Optional[Tuple[float, float, float, float, float, float]] = None,
+
+        d_safe: float = 3.0,
+
+        obstacle_margin: float = 2.0,
+
+        v_max: float = 15.0,
+
+        delta_t: float = 1.0,
+
+        reach_tolerance: float = 5.0,
+
+        max_steps: int = 100,
+
+        edge_server_pos: Tuple[float, float, float] = (100.0, 100.0, 0.0),
+
+        **kwargs
+
+    ) -> Dict[str, Any]:
+
+        """
+
+        Executes hierarchical hybrid 3D A* corridor tracking coupled with reactive MAPPO offloading.
+
+        Returns standardized JSON contract dictionary for WebGL visualizer.
+
+        """
+
+        import torch
+
+        start = np.asarray(start, dtype=np.float32)
+
+        target = np.asarray(target, dtype=np.float32)
+
+        use_bounds = bounds or self.bounds
+
+        use_obstacles = obstacles if obstacles is not None else self.raw_obs
+
+
+
+        planner = AStar3DPlanner(
+
+            obstacles=use_obstacles,
+
+            bounds=use_bounds,
+
+            grid_res=5.0,
+
+            d_safe=d_safe,
+
+            obstacle_margin=obstacle_margin
+
+        )
+
+        path_3d, t_plan, exp_list = planner.plan_path_with_details(start, target)
+
+        explored_nodes = [[float(p[0]), float(p[1]), float(p[2])] for p in exp_list[:500]]
+
+        path_coords = [start.tolist()]
+
+        steps_telemetry = []
+
+
+
+        if path_3d is None or len(path_3d) < 2:
+
+            return {
+
+                "status": "NO_PATH_FOUND",
+
+                "planner": "hybrid_astar_mappo",
+
+                "path": path_coords,
+
+                "explored_nodes": explored_nodes,
+
+                "total_path_length": 0.0,
+
+                "planning_time_ms": round(t_plan, 2),
+
+                "min_clearance": compute_min_clearance(start, use_obstacles, obstacle_margin),
+
+                "steps_count": 0,
+
+                "steps_telemetry": []
+
+            }
+
+
+
+        tracker = PurePursuit3DController(
+
+            waypoints=path_3d,
+
+            v_max=v_max,
+
+            lookahead_dist=self.lookahead,
+
+            acceptance_radius=reach_tolerance,
+
+            decel_dist=15.0
+
+        )
+
+        safety = SafetyFilter(
+
+            obstacles=use_obstacles,
+
+            d_safe=d_safe,
+
+            obstacle_margin=obstacle_margin,
+
+            bounds=use_bounds
+
+        )
+
+
+
+        curr_pos = np.copy(start)
+
+        curr_vel = np.zeros(3, dtype=np.float32)
+
+        status = "PATH_FOUND"
+
+
+
+        for s in range(max_steps):
+
+            d_final = float(np.linalg.norm(curr_pos - target))
+
+            if d_final <= reach_tolerance:
+
+                status = "GOAL_REACHED"
+
+                break
+
+
+
+            next_pos, v_cmd, wp_idx, trk_status = tracker.step(curr_pos, dt=delta_t)
+
+            subgoal = np.array(path_3d[min(wp_idx, len(path_3d) - 1)], dtype=np.float32)
+
+
+
+            obs_vec = build_single_uav_obs(
+
+                pos=curr_pos,
+
+                vel=curr_vel,
+
+                station_pos=target,
+
+                edge_pos=np.array(edge_server_pos, dtype=np.float32),
+
+                obstacles=use_obstacles,
+
+                v_max=v_max,
+
+                airspace_bound=use_bounds[1]
+
+            )
+
+
+
+            offload_name = "Local On-Board"
+
+            u_neural = np.zeros(3, dtype=np.float32)
+
+            if self.mappo_agent is not None:
+
+                t_obs = torch.tensor(obs_vec, dtype=torch.float32, device=self.mappo_agent.device).unsqueeze(0)
+
+                with torch.no_grad():
+
+                    act_move, act_off, _ = self.mappo_agent.actor.sample_action(t_obs, deterministic=True)
+
+                u_neural = act_move.squeeze(0).cpu().numpy().astype(np.float32)
+
+                off_choice = int(act_off.squeeze(0).cpu().item())
+
+                offload_name = "Local On-Board" if off_choice == 0 else (f"Peer UAV #{off_choice}" if off_choice <= 3 else "Ground Edge Server")
+
+
+
+            if self.residual_weight > 0.0:
+
+                dist_to_goal = float(np.linalg.norm(target - curr_pos))
+
+                damping = float(np.clip((dist_to_goal - reach_tolerance * 0.7) / (reach_tolerance * 1.5), 0.0, 1.0))
+
+                combined_vel = v_cmd + self.residual_weight * damping * u_neural
+
+                speed = float(np.linalg.norm(combined_vel))
+
+                u_applied = (combined_vel / speed) * v_max if speed > v_max else combined_vel
+
+            else:
+
+                u_applied = v_cmd
+
+
+
+            if d_final < v_max * delta_t:
+
+                max_speed = max(0.5, d_final / delta_t)
+
+                mag = float(np.linalg.norm(u_applied))
+
+                if mag > max_speed:
+
+                    u_applied = u_applied * (max_speed / mag)
+
+
+
+            proposed_pos = curr_pos + u_applied * delta_t
+
+            safe_dict, interv = safety.filter_trajectories({0: proposed_pos}, {0: curr_pos}, enable_filter=True)
+
+            filtered_pos = safe_dict[0]
+
+            actual_disp = filtered_pos - curr_pos
+
+            curr_vel = actual_disp / delta_t
+
+            curr_pos = filtered_pos
+
+            path_coords.append(curr_pos.tolist())
+
+
+
+            min_c = compute_min_clearance(curr_pos, use_obstacles, obstacle_margin)
+
+
+
+            steps_telemetry.append({
+
+                "step": s + 1,
+
+                "pos": [round(float(curr_pos[0]), 2), round(float(curr_pos[1]), 2), round(float(curr_pos[2]), 2)],
+
+                "speed": round(float(np.linalg.norm(curr_vel)), 2),
+
+                "dist_to_target": round(float(np.linalg.norm(curr_pos - target)), 2),
+
+                "min_clearance": round(min_c, 2),
+
+                "safety_intervened": bool(interv > 0),
+
+                "explanation": {
+
+                    "planner": "Hierarchical A* + MAPPO (Hybrid)",
+
+                    "decision_type": f"Global A* Subgoal #{wp_idx}/{len(path_3d) - 1} + Local Policy",
+
+                    "active_subgoal": [round(float(subgoal[0]), 2), round(float(subgoal[1]), 2), round(float(subgoal[2]), 2)],
+
+                    "offload_decision": offload_name,
+
+                    "observation_target_rel": [round(float(obs_vec[6]), 2), round(float(obs_vec[7]), 2), round(float(obs_vec[8]), 2)],
+
+                    "observation_obstacle_rel": [round(float(obs_vec[17]), 2), round(float(obs_vec[18]), 2), round(float(obs_vec[19]), 2)],
+
+                    "neural_action": [round(float(u_neural[0]), 2), round(float(u_neural[1]), 2), round(float(u_neural[2]), 2)],
+
+                    "executed_control": [round(float(curr_vel[0]), 2), round(float(curr_vel[1]), 2), round(float(curr_vel[2]), 2)],
+
+                    "safety_filter_status": "INTERVENTION TRIGGERED" if interv > 0 else "Clear flight"
+
+                }
+
+            })
+
+
+
+            if float(np.linalg.norm(curr_pos - target)) <= reach_tolerance:
+
+                status = "GOAL_REACHED"
+
+                break
+
+
+
+        p_arr = np.array(path_coords)
+
+        total_len = float(np.sum(np.linalg.norm(np.diff(p_arr, axis=0), axis=1))) if len(p_arr) > 1 else 0.0
+
+        all_clearances = [compute_min_clearance(p, use_obstacles, obstacle_margin) for p in p_arr]
+
+        min_overall_clearance = float(min(all_clearances)) if all_clearances else 0.0
+
+
+
+        return {
+
+            "status": status,
+
+            "planner": "hybrid_astar_mappo",
+
+            "path": path_coords,
+
+            "explored_nodes": explored_nodes,
+
+            "total_path_length": round(total_len, 2),
+
+            "planning_time_ms": round(t_plan, 2),
+
+            "min_clearance": round(min_overall_clearance, 2),
+
+            "steps_count": len(path_coords) - 1,
+
+            "steps_telemetry": steps_telemetry
+
+        }
 

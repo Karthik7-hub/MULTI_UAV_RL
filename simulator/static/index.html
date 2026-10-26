@@ -134,9 +134,14 @@
                             <input type="number" id="tgt-z" class="num-input coord" value="10" step="5" title="Z (m)">
                         </div>
                     </div>
-                    <button class="btn btn-secondary w-100 mt-2" id="btn-update-endpoints">
-                        <i class="fa-solid fa-arrows-rotate"></i> Apply Coordinates
-                    </button>
+                    <div class="endpoint-btn-row" style="display: flex; gap: 6px; margin-top: 8px;">
+                        <button class="btn btn-secondary" style="flex: 1;" id="btn-update-endpoints">
+                            <i class="fa-solid fa-arrows-rotate"></i> Apply
+                        </button>
+                        <button class="btn btn-secondary" style="flex: 1;" id="btn-random-endpoints" title="Generate Random Collision-Free Start & Goal">
+                            <i class="fa-solid fa-shuffle"></i> Randomize
+                        </button>
+                    </div>
                 </div>
 
                 <!-- Obstacles Section -->
@@ -275,7 +280,7 @@
                 <div id="inspector-compare-view" style="display: none;">
                     <div class="section-group">
                         <div class="section-header">Active Trajectory Layers</div>
-                        <div class="comp-check-list">
+                        <div class="comp-check-list" style="max-height: 220px; overflow-y: auto;">
                             <label class="comp-check-item">
                                 <input type="checkbox" id="chk-algo-hybrid" checked data-algo="hybrid_astar_mappo">
                                 <span class="comp-color-dot" style="background: #1D4ED8;"></span>
@@ -288,14 +293,49 @@
                                 <span class="comp-algo-name">3D A* Baseline</span>
                             </label>
                             <label class="comp-check-item">
-                                <input type="checkbox" id="chk-algo-residual" checked data-algo="mappo_residual">
+                                <input type="checkbox" id="chk-algo-rrt" checked data-algo="rrt_star">
+                                <span class="comp-color-dot" style="background: #16A34A;"></span>
+                                <span class="comp-algo-name">3D RRT* (Optimal Tree)</span>
+                            </label>
+                            <label class="comp-check-item">
+                                <input type="checkbox" id="chk-algo-sapf" checked data-algo="sapf">
                                 <span class="comp-color-dot" style="background: #D97706;"></span>
+                                <span class="comp-algo-name">3D SAPF (Adaptive Field)</span>
+                            </label>
+                            <label class="comp-check-item">
+                                <input type="checkbox" id="chk-algo-residual" checked data-algo="mappo_residual">
+                                <span class="comp-color-dot" style="background: #EA580C;"></span>
                                 <span class="comp-algo-name">APF-Residual MAPPO</span>
                             </label>
                             <label class="comp-check-item">
                                 <input type="checkbox" id="chk-algo-pure" checked data-algo="mappo_pure">
                                 <span class="comp-color-dot" style="background: #8B5CF6;"></span>
                                 <span class="comp-algo-name">Pure MAPPO Policy</span>
+                            </label>
+                            <label class="comp-check-item">
+                                <input type="checkbox" id="chk-algo-ippo-res" checked data-algo="ippo_residual">
+                                <span class="comp-color-dot" style="background: #0D9488;"></span>
+                                <span class="comp-algo-name">IPPO Residual</span>
+                            </label>
+                            <label class="comp-check-item">
+                                <input type="checkbox" id="chk-algo-ippo-pure" checked data-algo="ippo_pure">
+                                <span class="comp-color-dot" style="background: #06B6D4;"></span>
+                                <span class="comp-algo-name">IPPO Pure</span>
+                            </label>
+                            <label class="comp-check-item">
+                                <input type="checkbox" id="chk-algo-maddpg-res" checked data-algo="maddpg_residual">
+                                <span class="comp-color-dot" style="background: #EC4899;"></span>
+                                <span class="comp-algo-name">MADDPG Residual</span>
+                            </label>
+                            <label class="comp-check-item">
+                                <input type="checkbox" id="chk-algo-maddpg-pure" checked data-algo="maddpg_pure">
+                                <span class="comp-color-dot" style="background: #F43F5E;"></span>
+                                <span class="comp-algo-name">MADDPG Pure</span>
+                            </label>
+                            <label class="comp-check-item">
+                                <input type="checkbox" id="chk-algo-cppo" checked data-algo="cppo">
+                                <span class="comp-color-dot" style="background: #6366F1;"></span>
+                                <span class="comp-algo-name">Centralized PPO (CPPO)</span>
                             </label>
                         </div>
                     </div>
@@ -316,11 +356,30 @@
         <div class="control-left">
             <span class="control-label">Planner</span>
             <select id="planner-selector" class="control-select">
-                <option value="hybrid_astar_mappo">Hierarchical A* + MAPPO (Proposed)</option>
-                <option value="astar">3D A* + Pure Pursuit Baseline</option>
-                <option value="mappo_residual">APF-Residual MAPPO</option>
-                <option value="mappo_pure">Pure MAPPO Policy</option>
-                <option value="compare_all">Batch Comparison (Simultaneous)</option>
+                <optgroup label="Classical & Hybrid Planners">
+                    <option value="hybrid_astar_mappo">Hierarchical A* + MAPPO (Hybrid Proposed)</option>
+                    <option value="astar">3D A* Baseline (Graph Search)</option>
+                    <option value="rrt_star">3D RRT* (Optimal Tree)</option>
+                    <option value="sapf">3D SAPF (Adaptive Potential Field)</option>
+                </optgroup>
+                <optgroup label="Multi-Agent PPO (CTDE)">
+                    <option value="mappo_residual">APF-Residual MAPPO</option>
+                    <option value="mappo_pure">Pure MAPPO Policy</option>
+                </optgroup>
+                <optgroup label="Independent PPO (DTDE)">
+                    <option value="ippo_residual">Independent PPO (Residual)</option>
+                    <option value="ippo_pure">Independent PPO (Pure)</option>
+                </optgroup>
+                <optgroup label="Multi-Agent DDPG (Off-Policy)">
+                    <option value="maddpg_residual">Multi-Agent DDPG (Residual)</option>
+                    <option value="maddpg_pure">Multi-Agent DDPG (Pure)</option>
+                </optgroup>
+                <optgroup label="Centralized PPO (CTCE)">
+                    <option value="cppo">Centralized PPO (CPPO)</option>
+                </optgroup>
+                <optgroup label="Benchmark Suite">
+                    <option value="compare_all">Batch Comparison (All 11 Planners)</option>
+                </optgroup>
             </select>
             <button class="btn btn-plan-fly" id="btn-plan-run">
                 <i class="fa-solid fa-play"></i> Plan &amp; Fly

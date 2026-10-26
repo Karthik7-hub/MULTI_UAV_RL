@@ -10,6 +10,10 @@ Features:
 import time
 import numpy as np
 from typing import List, Tuple, Dict, Any, Optional
+from models.astar import PurePursuit3DController
+from env.safety_filter import SafetyFilter
+from env.observation_builder import build_single_uav_obs
+from env.safety_filter import compute_min_clearance
 
 class RRTStarNode:
     def __init__(self, pos: np.ndarray, parent=None, cost: float = 0.0):
@@ -44,7 +48,11 @@ class RRTStar3DPlanner:
                 self.z_min <= pos[2] <= self.z_max):
             return False
 
-        for cx, cy, r, h in self.obstacles:
+        for obs in self.obstacles:
+            if isinstance(obs, dict):
+                cx, cy, r, h = float(obs["cx"]), float(obs["cy"]), float(obs["radius"]), float(obs["height"])
+            else:
+                cx, cy, r, h = float(obs[0]), float(obs[1]), float(obs[2]), float(obs[3])
             eff_r = r + self.eff_margin
             eff_h = h + self.eff_margin
             d_xy = np.linalg.norm(pos[:2] - np.array([cx, cy]))
@@ -180,38 +188,63 @@ class RRTStar3DPlanner:
             path.append(curr.pos)
             curr = curr.parent
         path.reverse()
-
+        self.last_nodes = [n.pos.tolist() for n in nodes]
         planning_time = (time.time() - t0) * 1000.0
         return path, planning_time
 
 class RRTStarBaseline:
     """
-    # =========================================================================
-    # PURPOSE:
-    # Autonomous 3D RRT* Trajectory Following & MEC Offloading Baseline.
-    # Combines asymptotic optimal random-sampling path planning with rule-based
-    # edge computing offloading policies.
-    #
-    # EXECUTION PIPELINE:
-    # 1. On first step / reset: Plans 3D RRT* waypoint sequence to station.
-    # 2. At each timestep: Steers UAV toward active waypoint along the tree branch.
-    # 3. Task Offloading: Dispatches task to designated heuristic (e.g., energy-deadline aware).
-    # =========================================================================
+    Autonomous 3D RRT* Trajectory Following & MEC Offloading Baseline.
+    Supports:
+    1. Multi-UAV Gym Environment step-by-step evaluation (evaluate.py).
+    2. Autonomous point-to-point 3D trajectory simulation (WebGL visualizer).
     """
-    def __init__(self, env, offload_policy=None):
+    def __init__(
+        self,
+        env: Optional[Any] = None,
+        offload_policy=None,
+        obstacles: Optional[list] = None,
+        bounds: Tuple[float, float, float, float, float, float] = (0.0, 200.0, 0.0, 200.0, 0.0, 100.0),
+        step_size: float = 6.0,
+        search_radius: float = 18.0,
+        max_iters: int = 450,
+        goal_sample_rate: float = 0.15,
+        d_safe: float = 3.0,
+        obstacle_margin: float = 2.0
+    ):
         self.env = env
-        self.planner = RRTStar3DPlanner(
-            obstacles=env.cfg.airspace.obstacles,
-            bounds=(
+        from models.baselines import EnergyDeadlineAwareGreedyPolicy
+        self.offload_policy = offload_policy or EnergyDeadlineAwareGreedyPolicy()
+        self.bounds = bounds
+        self.step_size = step_size
+        self.search_radius = search_radius
+        self.max_iters = max_iters
+        self.goal_sample_rate = goal_sample_rate
+        self.d_safe = d_safe
+        self.obstacle_margin = obstacle_margin
+
+        if env is not None:
+            raw_obs = env.cfg.airspace.obstacles
+            self.bounds = (
                 env.cfg.airspace.x_min, env.cfg.airspace.x_max,
                 env.cfg.airspace.y_min, env.cfg.airspace.y_max,
                 env.cfg.airspace.z_min, env.cfg.airspace.z_max
-            ),
-            d_safe=env.cfg.physics.d_safe,
-            obstacle_margin=env.cfg.physics.obstacle_margin
+            )
+            self.d_safe = env.cfg.physics.d_safe
+            self.obstacle_margin = env.cfg.physics.obstacle_margin
+        else:
+            raw_obs = obstacles or []
+
+        self.planner = RRTStar3DPlanner(
+            obstacles=raw_obs,
+            bounds=self.bounds,
+            step_size=self.step_size,
+            search_radius=self.search_radius,
+            max_iters=self.max_iters,
+            goal_sample_rate=self.goal_sample_rate,
+            d_safe=self.d_safe,
+            obstacle_margin=self.obstacle_margin
         )
-        from models.baselines import EnergyDeadlineAwareGreedyPolicy
-        self.offload_policy = offload_policy or EnergyDeadlineAwareGreedyPolicy()
         self.cached_paths = {}
         self.current_wp_idx = {}
         self.planning_times = {}
@@ -258,3 +291,149 @@ class RRTStarBaseline:
             actions[j] = {"move": disp.astype(np.float32), "offload": offload_act}
 
         return actions
+
+    def simulate_trajectory(
+        self,
+        start: np.ndarray,
+        target: np.ndarray,
+        obstacles: Optional[list] = None,
+        bounds: Optional[Tuple[float, float, float, float, float, float]] = None,
+        d_safe: float = 3.0,
+        obstacle_margin: float = 2.0,
+        v_max: float = 15.0,
+        delta_t: float = 1.0,
+        reach_tolerance: float = 5.0,
+        max_steps: int = 100,
+        lookahead_dist: float = 10.0,
+        decel_dist: float = 15.0,
+        seed: Optional[int] = None,
+        edge_server_pos: Tuple[float, float, float] = (100.0, 100.0, 0.0),
+        **kwargs
+    ) -> Dict[str, Any]:
+        """
+        Executes complete 3D RRT* tree sampling, trajectory tracking, and live telemetry generation.
+        Returns standardized JSON contract dictionary for WebGL visualizer.
+        """
+        start = np.asarray(start, dtype=np.float32)
+        target = np.asarray(target, dtype=np.float32)
+        use_bounds = bounds or self.bounds
+        use_obstacles = obstacles if obstacles is not None else self.planner.obstacles
+        rrt_seed = int(seed) if seed is not None else int(time.time() * 1000) % 100000
+
+        planner = RRTStar3DPlanner(
+            obstacles=use_obstacles,
+            bounds=use_bounds,
+            step_size=self.step_size,
+            search_radius=self.search_radius,
+            max_iters=self.max_iters,
+            goal_sample_rate=self.goal_sample_rate,
+            d_safe=d_safe,
+            obstacle_margin=obstacle_margin
+        )
+
+        path_3d, t_plan = planner.plan_path(start, target, seed=rrt_seed)
+        all_nodes = getattr(planner, "last_nodes", [])
+        explored_nodes = [[float(p[0]), float(p[1]), float(p[2])] for p in all_nodes[:600]]
+        path_coords = [start.tolist()]
+        steps_telemetry = []
+
+        if path_3d is None or len(path_3d) < 2:
+            return {
+                "status": "NO_PATH_FOUND",
+                "planner": "rrt_star",
+                "path": path_coords,
+                "explored_nodes": explored_nodes,
+                "total_path_length": 0.0,
+                "planning_time_ms": round(t_plan, 2),
+                "min_clearance": compute_min_clearance(start, use_obstacles, obstacle_margin),
+                "steps_count": 0,
+                "steps_telemetry": []
+            }
+
+        tracker = PurePursuit3DController(
+            waypoints=path_3d,
+            v_max=v_max,
+            lookahead_dist=lookahead_dist,
+            acceptance_radius=reach_tolerance,
+            decel_dist=decel_dist
+        )
+        safety = SafetyFilter(
+            obstacles=use_obstacles,
+            d_safe=d_safe,
+            obstacle_margin=obstacle_margin,
+            bounds=use_bounds
+        )
+
+        curr_pos = np.copy(start)
+        cum_dist = 0.0
+        status = "PATH_FOUND"
+
+        for s in range(max_steps):
+            d_target = float(np.linalg.norm(curr_pos - target))
+            if d_target <= reach_tolerance:
+                status = "GOAL_REACHED"
+                break
+
+            next_pos, v_cmd, wp_idx, trk_status = tracker.step(curr_pos, dt=delta_t)
+            safe_dict, interv = safety.filter_trajectories({0: next_pos}, {0: curr_pos}, enable_filter=True)
+            actual_pos = safe_dict[0]
+            actual_disp = actual_pos - curr_pos
+            actual_speed = float(np.linalg.norm(actual_disp)) / delta_t
+            cum_dist += float(np.linalg.norm(actual_disp))
+            curr_pos = actual_pos
+            path_coords.append(curr_pos.tolist())
+
+            min_c = compute_min_clearance(curr_pos, use_obstacles, obstacle_margin)
+
+            obs_vec = build_single_uav_obs(
+                pos=curr_pos,
+                vel=actual_disp / delta_t,
+                station_pos=target,
+                edge_pos=np.array(edge_server_pos, dtype=np.float32),
+                obstacles=use_obstacles,
+                v_max=v_max,
+                airspace_bound=use_bounds[1]
+            )
+
+            steps_telemetry.append({
+                "step": s + 1,
+                "pos": [round(float(curr_pos[0]), 2), round(float(curr_pos[1]), 2), round(float(curr_pos[2]), 2)],
+                "speed": round(actual_speed, 2),
+                "dist_to_target": round(d_target, 2),
+                "min_clearance": round(min_c, 2),
+                "safety_intervened": bool(interv > 0),
+                "explanation": {
+                    "planner": "3D RRT* (Optimal Tree)",
+                    "decision_type": "Sampling-Based Tree + Asymptotic Rewiring",
+                    "g_cost": round(cum_dist, 2),
+                    "h_cost": round(d_target, 2),
+                    "f_cost": round(cum_dist + d_target, 2),
+                    "direction_chosen": f"Tree Node #{wp_idx + 1} / {len(path_3d)}",
+                    "explored_nodes_count": len(all_nodes),
+                    "observation_target_rel": [round(float(obs_vec[6]), 2), round(float(obs_vec[7]), 2), round(float(obs_vec[8]), 2)],
+                    "observation_obstacle_rel": [round(float(obs_vec[17]), 2), round(float(obs_vec[18]), 2), round(float(obs_vec[19]), 2)],
+                    "neural_action": [round(float(v_cmd[0]), 2), round(float(v_cmd[1]), 2), round(float(v_cmd[2]), 2)],
+                    "executed_control": [round(float(actual_disp[0]), 2), round(float(actual_disp[1]), 2), round(float(actual_disp[2]), 2)]
+                }
+            })
+
+            if trk_status == "GOAL_REACHED" or float(np.linalg.norm(curr_pos - target)) <= reach_tolerance:
+                status = "GOAL_REACHED"
+                break
+
+        p_arr = np.array(path_coords)
+        total_len = float(np.sum(np.linalg.norm(np.diff(p_arr, axis=0), axis=1))) if len(p_arr) > 1 else 0.0
+        all_clearances = [compute_min_clearance(p, use_obstacles, obstacle_margin) for p in p_arr]
+        min_overall_clearance = float(min(all_clearances)) if all_clearances else 0.0
+
+        return {
+            "status": status,
+            "planner": "rrt_star",
+            "path": path_coords,
+            "explored_nodes": explored_nodes,
+            "total_path_length": round(total_len, 2),
+            "planning_time_ms": round(t_plan, 2),
+            "min_clearance": round(min_overall_clearance, 2),
+            "steps_count": len(path_coords) - 1,
+            "steps_telemetry": steps_telemetry
+        }

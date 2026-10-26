@@ -23,32 +23,58 @@ class CentralizedActorNetwork(nn.Module):
         self.num_offload_actions = num_offload_actions
         self.max_disp = max_disp
 
-        self.backbone = nn.Sequential(
-            nn.Linear(state_dim, hidden_dim * 2),
+        # Two-Stream Decoupled Architecture for Centralized Actor:
+        # State: 40 dims (10 per UAV: pos(3), vel(3), dist(1), task(3))
+        # Nav features: pos, vel, dist for all 4 UAVs (7 * 4 = 28 dims)
+        # Offload features: pos, task, dist for all 4 UAVs (7 * 4 = 28 dims)
+        self.nav_indices = []
+        self.offload_indices = []
+        for j in range(num_uavs):
+            self.nav_indices.extend([j * 10 + k for k in range(7)])
+            self.offload_indices.extend([j * 10 + 0, j * 10 + 1, j * 10 + 2, j * 10 + 6, j * 10 + 7, j * 10 + 8, j * 10 + 9])
+        
+        self.nav_dim = len(self.nav_indices) if state_dim == 40 else state_dim
+        self.offload_dim = len(self.offload_indices) if state_dim == 40 else state_dim
+
+        self.nav_backbone = nn.Sequential(
+            nn.Linear(self.nav_dim, hidden_dim * 2),
             nn.LayerNorm(hidden_dim * 2),
             nn.Tanh(),
             nn.Linear(hidden_dim * 2, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.Tanh()
         )
-        # Joint continuous movement head for all UAVs: (num_uavs * 3)
         self.move_mean_head = nn.Linear(hidden_dim, num_uavs * 3)
-        self.move_log_std = nn.Parameter(torch.zeros(num_uavs * 3) - 0.5)
+        self.move_log_std = nn.Parameter(torch.zeros(num_uavs * 3) - 0.2)
 
-        # Joint discrete offload heads: list of linear layers for each UAV
+        self.offload_backbone = nn.Sequential(
+            nn.Linear(self.offload_dim, hidden_dim * 2),
+            nn.LayerNorm(hidden_dim * 2),
+            nn.Tanh(),
+            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.Tanh()
+        )
         self.offload_heads = nn.ModuleList([
             nn.Linear(hidden_dim, num_offload_actions) for _ in range(num_uavs)
         ])
 
     def forward(self, state: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        features = self.backbone(state)
-        # Continuous moves: (batch, num_uavs, 3)
-        raw_move = self.move_mean_head(features).view(-1, self.num_uavs, 3)
+        if state.shape[-1] == 40:
+            nav_feat = state[..., self.nav_indices]
+            offload_feat = state[..., self.offload_indices]
+        else:
+            nav_feat = state
+            offload_feat = state
+
+        nav_h = self.nav_backbone(nav_feat)
+        offload_h = self.offload_backbone(offload_feat)
+
+        raw_move = self.move_mean_head(nav_h).view(-1, self.num_uavs, 3)
         move_mean = torch.tanh(raw_move) * self.max_disp
         move_std = torch.exp(torch.clamp(self.move_log_std, -2.0, 0.5)).view(-1, self.num_uavs, 3)
 
-        # Offload logits: (batch, num_uavs, num_offload_actions)
-        logits_list = [head(features).unsqueeze(1) for head in self.offload_heads]
+        logits_list = [head(offload_h).unsqueeze(1) for head in self.offload_heads]
         offload_logits = torch.cat(logits_list, dim=1)
 
         return offload_logits, move_mean, move_std

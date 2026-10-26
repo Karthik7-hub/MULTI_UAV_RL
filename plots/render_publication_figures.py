@@ -10,6 +10,7 @@ Strictly adheres to IEEE/ACM journal publication standards:
 - Figure C: 3D Artificial Potential Field & Risk Landscape (Surface + Equipotential Gradient Streamlines)
 """
 
+from typing import Optional, List, Dict, Any, Tuple
 import os
 import sys
 import numpy as np
@@ -47,8 +48,10 @@ plt.rcParams.update({
 
 OUT_DIR = os.path.join(BASE_DIR, "results", "figures")
 PUB_DIR = os.path.join(BASE_DIR, "results", "publication_figures")
+PUB_NAV_DIR = os.path.join(PUB_DIR, "uav_path_planning")
 os.makedirs(OUT_DIR, exist_ok=True)
 os.makedirs(PUB_DIR, exist_ok=True)
+os.makedirs(PUB_NAV_DIR, exist_ok=True)
 
 # -----------------------------------------------------------------------------
 # HELPER: Draw Clean Solid Cylindrical Buildings in 3D
@@ -139,10 +142,13 @@ def generate_figure_a_coordinated_multi_uav():
         ys = uav_plot["y"].values
         zs = uav_plot["z"].values
 
-        # Calculate exact path length and min clearance
+        # Calculate exact path length and minimum surface clearance during flight
         path_len = float(np.sum(np.linalg.norm(np.diff(np.array(list(zip(xs, ys, zs))), axis=0), axis=1)))
-        min_clear = float(uav_plot["min_obs_clearance"].min())
-        uav_metrics.append((j, xs[0], ys[0], zs[0], xs[-1], ys[-1], zs[-1], path_len, flight_time, min_clear))
+        flight_pts = uav_plot[uav_plot["timestep"] >= 1]
+        min_clear = float(flight_pts["min_obs_clearance"].min() + 2.0) if not flight_pts.empty else float(uav_plot["min_obs_clearance"].min() + 2.0)
+        arrived = bool(arr_mask.any())
+        final_dist = float(uav_traj["dist_to_goal"].iloc[-1])
+        uav_metrics.append((j, xs[0], ys[0], zs[0], xs[-1], ys[-1], zs[-1], path_len, flight_time, min_clear, arrived, final_dist))
 
         # Plot 3D trajectory
         ax1.plot(xs, ys, zs, color=uav_colors[j], linewidth=2.8, label=uav_names[j], zorder=15)
@@ -233,24 +239,40 @@ def generate_figure_a_coordinated_multi_uav():
     ]
     ax2.legend(handles=legend_elements, loc="upper right", framealpha=0.92, fontsize=8.5, edgecolor="#E2E8F0")
 
-    # Inset Summary Statistics Table in lower margin
-    stat_text = (
-        f"Evaluated Fleet Navigation Metrics (Seed 101):\n"
-        f"• UAV 0: Path = {uav_metrics[0][7]:.1f}m | Arrival = {uav_metrics[0][8]:.1f}s | Min Clearance = {uav_metrics[0][9]:.2f}m | Status: Success (100%)\n"
-        f"• UAV 1: Path = {uav_metrics[1][7]:.1f}m | Arrival = {uav_metrics[1][8]:.1f}s | Min Clearance = {uav_metrics[1][9]:.2f}m | Status: Success (100%)\n"
-        f"• UAV 2: Path = {uav_metrics[2][7]:.1f}m | Arrival = {uav_metrics[2][8]:.1f}s | Min Clearance = {uav_metrics[2][9]:.2f}m | Status: Success (100%)\n"
-        f"• UAV 3: Path = {uav_metrics[3][7]:.1f}m | Arrival = {uav_metrics[3][8]:.1f}s | Min Clearance = {uav_metrics[3][9]:.2f}m | Status: Success (100%)\n"
-        f"Fleet Average Path: {np.mean([m[7] for m in uav_metrics]):.1f}m | Fleet Interventions: 12 (0 Collisions) | Mission Success: 100.0%"
+    # Inset Summary Statistics Table in lower margin: dynamically derived from raw data
+    summary_path = os.path.join(BASE_DIR, "results", "metropolis_evaluation_summary.csv")
+    fleet_interventions = "N/A"
+    if os.path.exists(summary_path):
+        sum_df = pd.read_csv(summary_path)
+        sub_sum = sum_df[sum_df["algorithm"] == "hybrid_astar_mappo"]
+        if not sub_sum.empty:
+            fleet_interventions = int(sub_sum["safety_interventions"].iloc[0])
+
+    arrived_count = sum(1 for m in uav_metrics if m[10])
+    fleet_success_rate = (arrived_count / len(uav_metrics)) * 100.0
+
+    stat_lines = [f"Evaluated Fleet Navigation Metrics (Single-Seed Case: Seed 101):"]
+    for m in uav_metrics:
+        u_id, _, _, _, _, _, _, plen, ftime, mclear, arr, final_d = m
+        status_str = f"Success ({ftime:.1f}s)" if arr else f"Failed (Final Dist: {final_d:.1f}m)"
+        stat_lines.append(f"• UAV {u_id}: Path = {plen:.1f}m | Arrival = {ftime:.1f}s | Min Surface Clearance = {mclear:.2f}m | Status: {status_str}")
+    stat_lines.append(
+        f"Fleet Average Path: {np.mean([m[7] for m in uav_metrics]):.1f}m | "
+        f"Fleet Interventions: {fleet_interventions} | "
+        f"Mission Success: {fleet_success_rate:.1f}% ({arrived_count}/{len(uav_metrics)} Reached Goal)"
     )
+    stat_text = "\n".join(stat_lines)
+
     plt.figtext(0.12, 0.02, stat_text, fontsize=8.5, family="monospace",
                 bbox=dict(boxstyle="round,pad=0.5", facecolor="#F8FAFC", edgecolor="#CBD5E1", alpha=0.95))
 
-    plt.suptitle("Figure A: Coordinated Multi-UAV 3D Navigation in 20-Skyscraper Metropolis (Proposed Hierarchical A* + MAPPO)",
-                 fontsize=13, fontweight="bold", y=0.97)
+    plt.suptitle("Figure A: Coordinated Multi-UAV 3D Navigation in 20-Skyscraper Metropolis (Single-Seed Case: Seed 101)\n"
+                 "[Corridor Planner: 3D A* + Pure Pursuit Tracker, Task Offloading: MAPPO]",
+                 fontsize=12, fontweight="bold", y=0.975)
     plt.tight_layout(rect=[0, 0.08, 1, 0.96])
 
-    out_png = os.path.join(PUB_DIR, "Figure_A_multi_uav_coordinated_trajectories.png")
-    out_pdf = os.path.join(PUB_DIR, "Figure_A_multi_uav_coordinated_trajectories.pdf")
+    out_png = os.path.join(PUB_NAV_DIR, "Figure_A_multi_uav_coordinated_trajectories.png")
+    out_pdf = os.path.join(PUB_NAV_DIR, "Figure_A_multi_uav_coordinated_trajectories.pdf")
     plt.savefig(out_png, dpi=350, bbox_inches="tight")
     plt.savefig(out_pdf, format="pdf", bbox_inches="tight")
     plt.savefig(os.path.join(OUT_DIR, "figure5_3d_metropolis_flight_trajectories.png"), dpi=350, bbox_inches="tight")
@@ -303,7 +325,7 @@ def generate_main_trajectory_3d():
 
     # Plot trajectories with distinct colors and line styles
     ax.plot(p_plot["x"], p_plot["y"], p_plot["z"], color="#1D4ED8", linewidth=2.6,
-            label="Hierarchical A* + MAPPO (Proposed)", zorder=15)
+            label="3D A* Corridor + Pure Pursuit (Offload: MAPPO, w_res=0.0)", zorder=15)
     ax.plot(a_plot["x"], a_plot["y"], a_plot["z"], color="#DC2626", linewidth=2.2,
             linestyle="--", label="3D A* Baseline", zorder=14)
 
@@ -328,16 +350,16 @@ def generate_main_trajectory_3d():
     ax.set_xlabel("Airspace $X$ (m)", labelpad=6)
     ax.set_ylabel("Airspace $Y$ (m)", labelpad=6)
     ax.set_zlabel("Flight Altitude $Z$ (m)", labelpad=6)
-    ax.set_title("3D Trajectory Comparison: Proposed Hierarchical A* + MAPPO vs 3D A*",
-                 fontsize=11.5, fontweight="bold", pad=12)
+    ax.set_title("3D Trajectory Comparison (Single-Seed Case: Seed 101, UAV 0)\n[3D A* Waypoints + Pure Pursuit Tracking vs 3D A* Baseline]",
+                 fontsize=11.0, fontweight="bold", pad=12)
     ax.view_init(elev=33, azim=-52)
     ax.grid(True, linestyle=":", alpha=0.45)
 
     ax.legend(loc="upper right", framealpha=0.92, fontsize=8.8, edgecolor="#CBD5E1")
     plt.tight_layout()
 
-    out_png = os.path.join(PUB_DIR, "trajectory_comparison_3d.png")
-    out_pdf = os.path.join(PUB_DIR, "trajectory_comparison_3d.pdf")
+    out_png = os.path.join(PUB_NAV_DIR, "trajectory_comparison_3d.png")
+    out_pdf = os.path.join(PUB_NAV_DIR, "trajectory_comparison_3d.pdf")
     plt.savefig(out_png, dpi=350, bbox_inches="tight")
     plt.savefig(out_pdf, format="pdf", bbox_inches="tight")
     plt.savefig(os.path.join(OUT_DIR, "figure2_3d_trajectory_comparison.png"), dpi=350, bbox_inches="tight")
@@ -373,11 +395,11 @@ def generate_figure_b_multimodel_trajectories():
     # Algorithm visual styling: IEEE Transactions compliant palette
     styles = {
         "hybrid_astar_mappo": {
-            "label": "Hierarchical A* + MAPPO (Proposed)",
+            "label": "3D A* Corridor + Pure Pursuit (Offload: MAPPO, w_res=0.0)",
             "color": "#1D4ED8", "ls": "-", "lw": 2.5, "marker": None, "markevery": 1, "z": 15
         },
         "astar": {
-            "label": "3D A* Baseline",
+            "label": "3D A* Baseline (Pure Pursuit Tracking)",
             "color": "#DC2626", "ls": "--", "lw": 1.7, "marker": "s", "markevery": 6, "z": 14
         },
         "sapf": {
@@ -522,8 +544,8 @@ def generate_figure_b_multimodel_trajectories():
 
     # Shared Top Legend with dedicated margin
     fig.subplots_adjust(top=0.86, bottom=0.10, left=0.06, right=0.96, wspace=0.18)
-    fig.suptitle("Comparative 3D Multi-Model Trajectory Planning Around Cylindrical Obstacles",
-                 fontsize=12, fontweight="bold", y=0.975)
+    fig.suptitle("Comparative 3D Multi-Model Trajectory Planning Around Cylindrical Obstacles (Single-Seed Case: Seed 101, UAV 0)",
+                 fontsize=11.5, fontweight="bold", y=0.975)
 
     fig.legend(
         legend_handles, legend_labels,
@@ -536,8 +558,8 @@ def generate_figure_b_multimodel_trajectories():
         fontsize=8.2
     )
 
-    out_png = os.path.join(PUB_DIR, "Figure_B_multimodel_trajectory_comparison.png")
-    out_pdf = os.path.join(PUB_DIR, "Figure_B_multimodel_trajectory_comparison.pdf")
+    out_png = os.path.join(PUB_NAV_DIR, "Figure_B_multimodel_trajectory_comparison.png")
+    out_pdf = os.path.join(PUB_NAV_DIR, "Figure_B_multimodel_trajectory_comparison.pdf")
     plt.savefig(out_png, dpi=300, bbox_inches="tight")
     plt.savefig(out_pdf, format="pdf", bbox_inches="tight")
 
@@ -636,87 +658,127 @@ def plot_publication_3d_trajectory_benchmark(
 
 
 # =============================================================================
-# 4. EXPORT QUANTITATIVE ALGORITHM METRICS CSV
+# =============================================================================
+# 4. EXPORT QUANTITATIVE ALGORITHM METRICS CSV (DYNAMICALLY DERIVED)
 # =============================================================================
 def export_algorithm_metrics_csv():
-    print("\n--- Exporting Quantitative Algorithm Comparison CSV ---")
+    """
+    Computes genuine quantitative navigation and mission metrics directly from
+    raw trajectory records (metropolis_trajectory_records.csv) and companion simulation logs.
+    Zero hardcoded metrics: all values are derived from actual coordinates and step outcomes.
+    """
+    print("\n--- Exporting Quantitative Algorithm Comparison CSV (Data-Derived) ---")
     data_path = os.path.join(BASE_DIR, "results", "metropolis_trajectory_records.csv")
+    if not os.path.exists(data_path):
+        raise FileNotFoundError(
+            f"Missing required simulation trajectory file: {data_path}.\n"
+            "Run python scratch/record_metropolis_trajectories.py to execute the simulation suite first."
+        )
+
     df = pd.read_csv(data_path)
+    summary_path = os.path.join(BASE_DIR, "results", "metropolis_evaluation_summary.csv")
+    df_summary = pd.read_csv(summary_path) if os.path.exists(summary_path) else None
 
-    metrics_rows = [
-        {
-            "Algorithm": "Hierarchical A* + MAPPO (Proposed)",
-            "Scenario": "Metropolis (20 Towers, Seed 101)",
-            "Mission Outcome": "Success (Goal Reached)",
-            "Success Rate (%)": 100.0,
-            "Path Length (m)": 110.8,
-            "Flight Time (s)": 8.0,
-            "Min Clearance (m)": 3.54,
-            "Safety Interventions": 12,
-            "Collisions": 0
-        },
-        {
-            "Algorithm": "3D A* Baseline",
-            "Scenario": "Metropolis (20 Towers, Seed 101)",
-            "Mission Outcome": "Success (Goal Reached)",
-            "Success Rate (%)": 100.0,
-            "Path Length (m)": 114.4,
-            "Flight Time (s)": 9.0,
-            "Min Clearance (m)": 3.59,
-            "Safety Interventions": 12,
-            "Collisions": 0
-        },
-        {
-            "Algorithm": "3D SAPF (Adaptive Potential Field)",
-            "Scenario": "Metropolis (20 Towers, Seed 101)",
-            "Mission Outcome": "Success (Goal Reached)",
-            "Success Rate (%)": 100.0,
-            "Path Length (m)": 186.5,
-            "Flight Time (s)": 16.0,
-            "Min Clearance (m)": 0.24,
-            "Safety Interventions": 36,
-            "Collisions": 0
-        },
-        {
-            "Algorithm": "3D RRT* (Optimal Tree)",
-            "Scenario": "Metropolis (20 Towers, Seed 101)",
-            "Mission Outcome": "Trapped (Obstacle Local Minimum)",
-            "Success Rate (%)": 0.0,
-            "Path Length (m)": 12.7,
-            "Flight Time (s)": 100.0,
-            "Min Clearance (m)": 0.30,
-            "Safety Interventions": 412,
-            "Collisions": 0
-        },
-        {
-            "Algorithm": "APF-Assisted Residual MAPPO",
-            "Scenario": "Metropolis (20 Towers, Seed 101)",
-            "Mission Outcome": "Trapped (APF Saddle Local Minimum)",
-            "Success Rate (%)": 0.0,
-            "Path Length (m)": 13.1,
-            "Flight Time (s)": 100.0,
-            "Min Clearance (m)": 0.13,
-            "Safety Interventions": 412,
-            "Collisions": 0
-        },
-        {
-            "Algorithm": "Pure MAPPO (No Global Guidance)",
-            "Scenario": "Metropolis (20 Towers, Seed 101)",
-            "Mission Outcome": "Failed (Goal Unreached)",
-            "Success Rate (%)": 0.0,
-            "Path Length (m)": 15.5,
-            "Flight Time (s)": 100.0,
-            "Min Clearance (m)": 0.01,
-            "Safety Interventions": 92,
-            "Collisions": 0
-        }
-    ]
+    obstacles = ENV_PRESETS["metropolis"]
+    reach_tolerance = 5.0
 
-    out_csv = os.path.join(PUB_DIR, "algorithm_metrics.csv")
+    algo_labels = {
+        "hybrid_astar_mappo": "3D A* Corridor + Pure Pursuit (Offload: MAPPO, w_res=0.0)",
+        "astar": "3D A* Baseline (Pure Pursuit Tracking)",
+        "sapf": "3D SAPF (Sequential Adaptive Potential Field)",
+        "rrt_star": "3D RRT* (Optimal Tree)",
+        "mappo_residual": "APF-Assisted Residual MAPPO",
+        "mappo_pure": "Proposed Pure MAPPO (No Geometric Prior)"
+    }
+
+    metrics_rows = []
+    algorithms_in_data = [a for a in ["hybrid_astar_mappo", "astar", "sapf", "rrt_star", "mappo_residual", "mappo_pure"] if a in df["algorithm"].unique()]
+
+    for algo_key in algorithms_in_data:
+        group = df[df["algorithm"] == algo_key]
+        uav_paths = []
+        uav_times = []
+        uav_clears = []
+        uav_success = []
+        uav_collisions = []
+
+        for uav_id in sorted(group["uav_id"].unique()):
+            uav_traj = group[group["uav_id"] == uav_id].sort_values("timestep")
+            arr_mask = uav_traj["dist_to_goal"] <= reach_tolerance
+            if arr_mask.any():
+                arr_step = int(uav_traj[arr_mask]["timestep"].iloc[0])
+                uav_plot = uav_traj[uav_traj["timestep"] <= arr_step]
+                flight_time = float(arr_step)
+                arrived = 1.0
+            else:
+                uav_plot = uav_traj
+                flight_time = float(uav_traj["timestep"].max())
+                arrived = 0.0
+
+            coords = uav_plot[["x", "y", "z"]].values
+            path_len = float(np.sum(np.linalg.norm(np.diff(coords, axis=0), axis=1))) if len(coords) > 1 else 0.0
+
+            # Flight clearance to obstacle cylinder physical surface (d - r) for t >= 1
+            flight_pts = uav_plot[uav_plot["timestep"] >= 1]
+            if not flight_pts.empty:
+                min_c = float(flight_pts["min_obs_clearance"].min() + 2.0)
+            else:
+                min_c = float(uav_plot["min_obs_clearance"].min() + 2.0)
+
+            # Check physical cylinder collision: inside cylinder radius r and height h
+            has_collided = 0
+            for pt in coords:
+                for cx, cy, r, h in obstacles:
+                    d_xy = np.sqrt((pt[0] - cx)**2 + (pt[1] - cy)**2)
+                    if d_xy < r and pt[2] <= h:
+                        has_collided = 1
+                        break
+                if has_collided:
+                    break
+
+            uav_paths.append(path_len)
+            uav_times.append(flight_time)
+            uav_clears.append(min_c)
+            uav_success.append(arrived)
+            uav_collisions.append(has_collided)
+
+        mean_path = round(float(np.mean(uav_paths)), 1)
+        mean_flight_time = round(float(np.mean(uav_times)), 1)
+        min_clearance = round(float(np.min(uav_clears)), 2)
+        success_rate = round(float(np.mean(uav_success)) * 100.0, 1)
+        collisions = int(sum(uav_collisions))
+
+        if success_rate == 100.0:
+            outcome = "Success (All UAVs Reached Goal)"
+        elif mean_path < 20.0:
+            outcome = "Trapped (Obstacle Local Minimum / Saddle)"
+        else:
+            outcome = "Failed (Goal Unreached Within Timeout)"
+
+        interventions = "N/A"
+        if df_summary is not None and not df_summary[df_summary["algorithm"] == algo_key].empty:
+            interventions = int(df_summary[df_summary["algorithm"] == algo_key]["safety_interventions"].iloc[0])
+
+        metrics_rows.append({
+            "Algorithm": algo_labels.get(algo_key, algo_key),
+            "Scenario": "Metropolis (20 Towers, Seed 101)",
+            "Evaluation Scope": "Single-Seed Illustration (Seed 101)",
+            "Mission Outcome": outcome,
+            "Success Rate (%)": success_rate,
+            "Path Length (m)": mean_path,
+            "Flight Time (s)": mean_flight_time,
+            "Min Clearance to Cylinder (m)": min_clearance,
+            "Safety Interventions": interventions,
+            "Collisions": collisions,
+            "Navigation Controller": "3D A* Waypoints + Pure Pursuit (w_res=0.0)" if algo_key == "hybrid_astar_mappo" else algo_labels.get(algo_key, algo_key)
+        })
+
+    out_csv = os.path.join(PUB_DIR, "joint_cooperative_system", "algorithm_metrics.csv")
+    os.makedirs(os.path.dirname(out_csv), exist_ok=True)
     metrics_df = pd.DataFrame(metrics_rows)
     metrics_df.to_csv(out_csv, index=False)
-    metrics_df.to_csv(os.path.join(BASE_DIR, "results", "algorithm_metrics.csv"), index=False)
-    print(f"[Exported] Algorithm metrics saved to:\n  -> {out_csv}")
+    print(f"[Exported] Genuine data-derived algorithm metrics saved to:\n  -> {out_csv}")
+    return metrics_df
 
 
 
@@ -728,10 +790,14 @@ def generate_figure_c_potential_field_surface():
     data_path = os.path.join(BASE_DIR, "results", "metropolis_trajectory_records.csv")
     df = pd.read_csv(data_path) if os.path.exists(data_path) else None
 
-    # APF Parameters from models/apf.py
-    k_att = 0.8
-    k_rep = 1500.0
-    d_0 = 22.0
+    # Genuine APF Parameters directly imported from models/apf.py (SAPFNavigator)
+    from models.apf import SAPFNavigator
+    import inspect
+    sig = inspect.signature(SAPFNavigator.__init__)
+    k_att = float(sig.parameters["k_att"].default)          # 1.0
+    k_rep = float(sig.parameters["k_rep"].default)          # 80.0
+    d_0 = float(sig.parameters["d_0"].default)              # 25.0
+    k_tangent = float(sig.parameters["k_tangent"].default)  # 45.0
     goal = np.array([120.0, 100.0])
 
     obstacles = ENV_PRESETS["metropolis"]
@@ -852,22 +918,23 @@ def generate_figure_c_potential_field_surface():
 
     ax2.legend(loc="upper left", framealpha=0.92, fontsize=8.5, edgecolor="#E2E8F0")
 
-    # Mathematical formulation text callout
+    # Mathematical formulation text callout synchronized with models/apf.py
     apf_formula_text = (
-        r"Mathematical APF Formulation (Directly from models/apf.py):" + "\n" +
-        r"• Attractive Potential: $U_{\mathrm{att}}(\mathbf{p}) = \frac{1}{2} k_{\mathrm{att}} \|\mathbf{p} - \mathbf{p}_{\mathrm{goal}}\|^2$,  $k_{\mathrm{att}} = 0.8$" + "\n" +
-        r"• Repulsive Potential: $U_{\mathrm{rep}}(\mathbf{p}) = \sum_{k} \frac{1}{2} k_{\mathrm{rep}} \left(\frac{1}{d_{\mathrm{surf}, k}} - \frac{1}{d_0}\right)^2 \cdot \mathbb{I}(d_{\mathrm{surf}, k} < d_0)$,  $k_{\mathrm{rep}} = 1500.0, d_0 = 22.0\,\mathrm{m}$" + "\n" +
-        r"• Gradient Descent Navigation: $\mathbf{v}_{\mathrm{nom}} \propto -\nabla U_{\mathrm{total}}(\mathbf{p})$ guiding the UAV along the potential saddle corridor to target station $G$."
+        r"Mathematical APF Formulation (Directly from models/apf.py: SAPFNavigator):" + "\n" +
+        f"• Attractive Potential: $U_{{\\mathrm{{att}}}}(\\mathbf{{p}}) = \\frac{{1}}{{2}} k_{{\\mathrm{{att}}}} \\|\\mathbf{{p}} - \\mathbf{{p}}_{{\\mathrm{{goal}}}}\\|^2, \\; k_{{\\mathrm{{att}}}} = {k_att:.1f}$\n" +
+        f"• Repulsive Potential: $U_{{\\mathrm{{rep}}}}(\\mathbf{{p}}) = \\sum_{{k}} \\frac{{1}}{{2}} k_{{\\mathrm{{rep}}}} \\left(\\frac{{1}}{{d_{{\\mathrm{{surf}}, k}}}} - \\frac{{1}}{{d_0}}\\right)^2, \\; k_{{\\mathrm{{rep}}}} = {k_rep:.1f}, \\; d_0 = {d_0:.1f}\\,\\mathrm{{m}}$\n" +
+        f"• Tangential Circulation: $\\mathbf{{F}}_{{\\mathrm{{tangent}}}} = k_{{\\mathrm{{tangent}}}} (1 / d_{{\\mathrm{{surf}}}}) \\mathbf{{n}}_{{\\perp}}, \\; k_{{\\mathrm{{tangent}}}} = {k_tangent:.1f}$ (vortex vector breaking local deadlocks)\n" +
+        r"• Note: Surface displays scalar planar energy slice; active dynamic steering incorporates 3D tangential vortex vectors."
     )
-    plt.figtext(0.12, 0.02, apf_formula_text, fontsize=8.2,
+    plt.figtext(0.12, 0.02, apf_formula_text, fontsize=8.0,
                 bbox=dict(boxstyle="round,pad=0.5", facecolor="#F8FAFC", edgecolor="#CBD5E1", alpha=0.95))
 
-    plt.suptitle("Figure C: Artificial Potential Field & Risk Landscape Visualization (Direct APF Formulation)",
-                 fontsize=13, fontweight="bold", y=0.97)
+    plt.suptitle("Figure C: Artificial Potential Field & Risk Landscape (Synchronized with models/apf.py)",
+                 fontsize=12.5, fontweight="bold", y=0.97)
     plt.tight_layout(rect=[0, 0.09, 1, 0.96])
 
-    out_png = os.path.join(PUB_DIR, "Figure_C_potential_field_risk_surface.png")
-    out_pdf = os.path.join(PUB_DIR, "Figure_C_potential_field_risk_surface.pdf")
+    out_png = os.path.join(PUB_NAV_DIR, "Figure_C_potential_field_risk_surface.png")
+    out_pdf = os.path.join(PUB_NAV_DIR, "Figure_C_potential_field_risk_surface.pdf")
     plt.savefig(out_png, dpi=350, bbox_inches="tight")
     plt.savefig(out_pdf, format="pdf", bbox_inches="tight")
     plt.close()
