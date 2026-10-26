@@ -161,7 +161,7 @@ def train_mappo(
     greedy_offloader = EnergyDeadlineAwareGreedyPolicy() if ablation == "fixed_offload" else None
 
     base_dir = os.path.dirname(os.path.abspath(__file__))
-    res_dir = output_dir or os.path.join(base_dir, "results", "v2_remediated")
+    res_dir = output_dir or os.path.join(base_dir, "results")
     ckpt_dir = os.path.join(res_dir, "checkpoints")
     best_ckpt_path = os.path.join(ckpt_dir, f"best_{tag}_agent.pt")
     final_ckpt_path = os.path.join(ckpt_dir, f"final_{tag}_agent.pt")
@@ -362,7 +362,7 @@ def train_ippo(num_episodes: int = 80, seed: int = 42, device: str = "auto", pol
     )
 
     base_dir = os.path.dirname(os.path.abspath(__file__))
-    res_dir = output_dir or os.path.join(base_dir, "results", "v2_remediated")
+    res_dir = output_dir or os.path.join(base_dir, "results")
     ckpt_dir = os.path.join(res_dir, "checkpoints")
     best_ckpt = os.path.join(ckpt_dir, f"best_ippo_{policy_variant}_agent.pt")
     final_ckpt = os.path.join(ckpt_dir, f"final_ippo_{policy_variant}_agent.pt")
@@ -511,7 +511,7 @@ def train_maddpg(num_episodes: int = 80, seed: int = 42, device: str = "auto", p
     )
 
     base_dir = os.path.dirname(os.path.abspath(__file__))
-    res_dir = output_dir or os.path.join(base_dir, "results", "v2_remediated")
+    res_dir = output_dir or os.path.join(base_dir, "results")
     ckpt_dir = os.path.join(res_dir, "checkpoints")
     best_ckpt = os.path.join(ckpt_dir, f"best_maddpg_{policy_variant}_agent.pt")
     final_ckpt = os.path.join(ckpt_dir, f"final_maddpg_{policy_variant}_agent.pt")
@@ -644,7 +644,7 @@ def train_cppo(num_episodes: int = 80, seed: int = 42, device: str = "auto", eva
     )
 
     base_dir = os.path.dirname(os.path.abspath(__file__))
-    res_dir = output_dir or os.path.join(base_dir, "results", "v2_remediated")
+    res_dir = output_dir or os.path.join(base_dir, "results")
     ckpt_dir = os.path.join(res_dir, "checkpoints")
     best_ckpt = os.path.join(ckpt_dir, "best_cppo_agent.pt")
     final_ckpt = os.path.join(ckpt_dir, "final_cppo_agent.pt")
@@ -789,7 +789,7 @@ def train_all(num_episodes: int = 500, seed: int = 42, device: str = "auto", pol
 
     # Automatically plot comparative convergence curve across all four algorithms
     base_dir = os.path.dirname(os.path.abspath(__file__))
-    res_dir = output_dir or os.path.join(base_dir, "results", "v2_remediated")
+    res_dir = output_dir or os.path.join(base_dir, "results")
     fig_dir = os.path.join(res_dir, "figures")
     csv_dict = {
         "mappo": os.path.join(res_dir, f"training_logs_mappo_{policy_variant}.csv" if os.path.exists(os.path.join(res_dir, f"training_logs_mappo_{policy_variant}.csv")) else os.path.join(res_dir, "training_logs_mappo.csv")),
@@ -833,10 +833,10 @@ if __name__ == "__main__":
     elif args.model == "mappo":
         train_mappo(num_episodes=args.episodes, seed=args.seed, device=args.device, policy_variant=args.variant, ablation=args.ablation, curriculum=args.curriculum, output_dir=args.output_dir)
     elif args.model == "ippo":
-        train_ippo(num_episodes=args.episodes, seed=args.seed, device=args.device, policy_variant=args.variant)
+        train_ippo(num_episodes=args.episodes, seed=args.seed, device=args.device, policy_variant=args.variant, curriculum=args.curriculum, output_dir=args.output_dir)
     elif args.model == "maddpg":
-        train_maddpg(num_episodes=args.episodes, seed=args.seed, device=args.device, policy_variant=args.variant)
+        train_maddpg(num_episodes=args.episodes, seed=args.seed, device=args.device, policy_variant=args.variant, curriculum=args.curriculum, output_dir=args.output_dir)
     elif args.model == "cppo":
-        train_cppo(num_episodes=args.episodes, seed=args.seed, device=args.device)
+        train_cppo(num_episodes=args.episodes, seed=args.seed, device=args.device, curriculum=args.curriculum, output_dir=args.output_dir)
     elif args.model == "ablation":
-        train_mappo(num_episodes=args.episodes, seed=args.seed, device=args.device, policy_variant=args.variant, ablation=args.ablation or "no_energy", curriculum=args.curriculum)
+        train_mappo(num_episodes=args.episodes, seed=args.seed, device=args.device, policy_variant=args.variant, ablation=args.ablation or "no_energy", curriculum=args.curriculum, output_dir=args.output_dir)
