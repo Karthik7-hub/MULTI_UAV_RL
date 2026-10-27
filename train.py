@@ -330,12 +330,15 @@ def train_mappo(
     df_metrics.to_csv(csv_log_path, index=False)
     if tag in ["mappo", "mappo_pure"]:
         df_metrics.to_csv(os.path.join(res_dir, "training_logs.csv"), index=False)
-        if "plot_training_convergence" in globals():
-            try:
+
+    if "plot_training_convergence" in globals():
+        try:
+            plot_training_convergence(csv_log_path, os.path.join(fig_dir, f"training_convergence_{tag}.png"))
+            if tag in ["mappo", "mappo_pure"]:
                 plot_training_convergence(csv_log_path, os.path.join(fig_dir, "training_convergence_curves.png"))
-                plot_aerodynamic_power_curve(env.aero, os.path.join(fig_dir, "aerodynamic_power_curve.png"))
-            except Exception as e:
-                print(f"[Warning] Failed to generate convergence plot: {e}")
+            plot_aerodynamic_power_curve(env.aero, os.path.join(fig_dir, "aerodynamic_power_curve.png"))
+        except Exception as e:
+            print(f"[Warning] Failed to generate convergence plot: {e}")
 
     print(f"[{tag.upper()} Finished] Best Checkpoint: {best_ckpt_path} | Final: {final_ckpt_path} | Log: {csv_log_path}")
     return best_ckpt_path
@@ -372,9 +375,13 @@ def train_ippo(num_episodes: int = 80, seed: int = 42, device: str = "auto", pol
     base_dir = os.path.dirname(os.path.abspath(__file__))
     res_dir = output_dir or os.path.join(base_dir, "results")
     ckpt_dir = os.path.join(res_dir, "checkpoints")
-    best_ckpt = os.path.join(ckpt_dir, f"best_ippo_{policy_variant}_agent.pt")
-    final_ckpt = os.path.join(ckpt_dir, f"final_ippo_{policy_variant}_agent.pt")
-    csv_log = os.path.join(res_dir, f"training_logs_ippo_{policy_variant}.csv")
+    fig_dir = os.path.join(res_dir, "figures")
+    os.makedirs(ckpt_dir, exist_ok=True)
+    os.makedirs(fig_dir, exist_ok=True)
+    tag = f"ippo_{policy_variant}"
+    best_ckpt = os.path.join(ckpt_dir, f"best_{tag}_agent.pt")
+    final_ckpt = os.path.join(ckpt_dir, f"final_{tag}_agent.pt")
+    csv_log = os.path.join(res_dir, f"training_logs_{tag}.csv")
 
     best_val_score = -float("inf")
     metrics = []
@@ -492,6 +499,11 @@ def train_ippo(num_episodes: int = 80, seed: int = 42, device: str = "auto", pol
             shutil.copyfile(best_ckpt, compat_path)
         shutil.copyfile(final_ckpt, compat_final)
     pd.DataFrame(metrics).to_csv(csv_log, index=False)
+    if "plot_training_convergence" in globals():
+        try:
+            plot_training_convergence(csv_log, os.path.join(fig_dir, f"training_convergence_{tag}.png"))
+        except Exception as e:
+            print(f"[Warning] Failed to generate IPPO plot: {e}")
     print(f"[IPPO Finished] Best Checkpoint: {best_ckpt} | Final: {final_ckpt} | Log: {csv_log}")
     return best_ckpt
 
@@ -521,9 +533,13 @@ def train_maddpg(num_episodes: int = 80, seed: int = 42, device: str = "auto", p
     base_dir = os.path.dirname(os.path.abspath(__file__))
     res_dir = output_dir or os.path.join(base_dir, "results")
     ckpt_dir = os.path.join(res_dir, "checkpoints")
-    best_ckpt = os.path.join(ckpt_dir, f"best_maddpg_{policy_variant}_agent.pt")
-    final_ckpt = os.path.join(ckpt_dir, f"final_maddpg_{policy_variant}_agent.pt")
-    csv_log = os.path.join(res_dir, f"training_logs_maddpg_{policy_variant}.csv")
+    fig_dir = os.path.join(res_dir, "figures")
+    os.makedirs(ckpt_dir, exist_ok=True)
+    os.makedirs(fig_dir, exist_ok=True)
+    tag = f"maddpg_{policy_variant}"
+    best_ckpt = os.path.join(ckpt_dir, f"best_{tag}_agent.pt")
+    final_ckpt = os.path.join(ckpt_dir, f"final_{tag}_agent.pt")
+    csv_log = os.path.join(res_dir, f"training_logs_{tag}.csv")
 
     best_val_score = -float("inf")
     metrics = []
@@ -627,6 +643,11 @@ def train_maddpg(num_episodes: int = 80, seed: int = 42, device: str = "auto", p
             shutil.copyfile(best_ckpt, compat_path)
         shutil.copyfile(final_ckpt, compat_final)
     pd.DataFrame(metrics).to_csv(csv_log, index=False)
+    if "plot_training_convergence" in globals():
+        try:
+            plot_training_convergence(csv_log, os.path.join(fig_dir, f"training_convergence_{tag}.png"))
+        except Exception as e:
+            print(f"[Warning] Failed to generate MADDPG plot: {e}")
     print(f"[MADDPG Finished] Best Checkpoint: {best_ckpt} | Final: {final_ckpt} | Log: {csv_log}")
     return best_ckpt
 
@@ -654,6 +675,9 @@ def train_cppo(num_episodes: int = 80, seed: int = 42, device: str = "auto", eva
     base_dir = os.path.dirname(os.path.abspath(__file__))
     res_dir = output_dir or os.path.join(base_dir, "results")
     ckpt_dir = os.path.join(res_dir, "checkpoints")
+    fig_dir = os.path.join(res_dir, "figures")
+    os.makedirs(ckpt_dir, exist_ok=True)
+    os.makedirs(fig_dir, exist_ok=True)
     best_ckpt = os.path.join(ckpt_dir, "best_cppo_agent.pt")
     final_ckpt = os.path.join(ckpt_dir, "final_cppo_agent.pt")
     csv_log = os.path.join(res_dir, "training_logs_cppo.csv")
@@ -782,6 +806,11 @@ def train_cppo(num_episodes: int = 80, seed: int = 42, device: str = "auto", eva
 
     agent.save_checkpoint(final_ckpt)
     pd.DataFrame(metrics).to_csv(csv_log, index=False)
+    if "plot_training_convergence" in globals():
+        try:
+            plot_training_convergence(csv_log, os.path.join(fig_dir, "training_convergence_cppo.png"))
+        except Exception as e:
+            print(f"[Warning] Failed to generate CPPO plot: {e}")
     print(f"[CPPO Finished] Best Checkpoint: {best_ckpt} | Final: {final_ckpt} | Log: {csv_log}")
     return best_ckpt
 
@@ -827,7 +856,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Ablation variant for MAPPO")
     parser.add_argument("--episodes", type=int, default=500, help="Number of training episodes")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
-    parser.add_argument("--device", type=str, default="auto", choices=["auto", "cuda", "cpu"], help="Compute device")
+    parser.add_argument("--device", type=str, default="auto", choices=["auto", "cuda", "cpu", "mps"], help="Compute device")
     parser.add_argument("--curriculum", action="store_true", default=True, help="Enable curriculum learning schedule")
     parser.add_argument("--output_dir", type=str, default=None, help="Quarantined output directory for results")
     return parser

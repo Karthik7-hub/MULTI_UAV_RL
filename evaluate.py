@@ -241,18 +241,32 @@ def run_evaluation(
     device: str = "auto",
     output_dir: str = "results",
     strict_ckpts: bool = True,
-    save_plots: bool = True
+    save_plots: bool = True,
+    model_filter: str = "all"
 ) -> pd.DataFrame:
     base_dir = os.path.dirname(os.path.abspath(__file__))
     res_dir = os.path.abspath(output_dir)
-    ckpt_dir = os.path.join(base_dir, "results", "checkpoints")
+    ckpt_dirs = [
+        os.path.join(base_dir, "results", "checkpoints"),
+        os.path.join(res_dir, "checkpoints"),
+        os.path.join(base_dir, "checkpoints")
+    ]
+    ckpt_dir = ckpt_dirs[0]  # Primary default for exports
     fig_dir = os.path.join(res_dir, "figures")
     os.makedirs(res_dir, exist_ok=True)
     if save_plots:
         os.makedirs(fig_dir, exist_ok=True)
 
+    def find_ckpt(filenames: List[str]) -> Optional[str]:
+        for cd in ckpt_dirs:
+            for fn in filenames:
+                p = os.path.join(cd, fn)
+                if os.path.exists(p):
+                    return p
+        return None
+
     dev = DeviceManager.select_device(device)
-    DeviceManager.print_diagnostics(dev, extra_config={"Mode": "Comprehensive Scientific Evaluation", "Output Dir": res_dir, "Test Seeds": str(test_seeds)})
+    DeviceManager.print_diagnostics(dev, extra_config={"Mode": "Comprehensive Scientific Evaluation", "Output Dir": res_dir, "Test Seeds": str(test_seeds), "Model Filter": model_filter})
 
     cfg = MasterConfig()
     env = MultiUAVEnv(cfg)
@@ -260,19 +274,19 @@ def run_evaluation(
 
     # Record Checkpoint Provenance Hashes
     ckpt_manifest = {}
-    for key, fn in [
-        ("mappo_pure", "best_mappo_pure_agent.pt"),
-        ("mappo_residual", "best_mappo_residual_agent.pt"),
-        ("ippo", "best_ippo_pure_agent.pt"),
-        ("maddpg", "best_maddpg_pure_agent.pt"),
-        ("cppo", "best_cppo_agent.pt"),
+    for key, fns in [
+        ("mappo_pure", ["best_mappo_pure_agent.pt", "final_mappo_pure_agent.pt"]),
+        ("mappo_residual", ["best_mappo_residual_agent.pt", "final_mappo_residual_agent.pt"]),
+        ("ippo", ["best_ippo_pure_agent.pt", "best_ippo_agent.pt"]),
+        ("maddpg", ["best_maddpg_pure_agent.pt", "best_maddpg_agent.pt"]),
+        ("cppo", ["best_cppo_agent.pt", "final_cppo_agent.pt"]),
     ]:
-        p = os.path.join(ckpt_dir, fn)
+        found_p = find_ckpt(fns)
         ckpt_manifest[key] = {
-            "filename": fn,
-            "path": p,
-            "exists": os.path.exists(p),
-            "sha256": get_file_sha256(p)
+            "filename": os.path.basename(found_p) if found_p else fns[0],
+            "path": found_p or os.path.join(ckpt_dir, fns[0]),
+            "exists": found_p is not None,
+            "sha256": get_file_sha256(found_p) if found_p else "MISSING"
         }
 
     # Initialize Agents
@@ -281,28 +295,27 @@ def run_evaluation(
     # 1. Pure MAPPO (Variant A: 100% Neural Output, No Injected APF)
     mappo_pure = MAPPOAgent(env.obs_dim, env.state_dim, num_uavs, num_uavs + 1, cfg.mappo.hidden_dim, policy_variant="pure", device=dev)
     loaded_pure = False
-    for ckpt in [os.path.join(ckpt_dir, "best_mappo_pure_agent.pt"), os.path.join(ckpt_dir, "final_mappo_pure_agent.pt")]:
-        if os.path.exists(ckpt):
-            mappo_pure.load_checkpoint(ckpt)
-            print(f"[Loaded Checkpoint] Pure MAPPO from {ckpt}")
-            loaded_pure = True
-            break
-    if not loaded_pure and strict_ckpts:
-        raise FileNotFoundError(f"Missing required checkpoint for Pure MAPPO in {ckpt_dir}!")
+    pure_p = find_ckpt(["best_mappo_pure_agent.pt", "final_mappo_pure_agent.pt", "best_mappo_agent.pt"])
+    if pure_p:
+        mappo_pure.load_checkpoint(pure_p)
+        print(f"[Loaded Checkpoint] Pure MAPPO from {pure_p}")
+        loaded_pure = True
+    elif strict_ckpts and model_filter in ["all", "mappo", "mappo_pure", "marl"]:
+        raise FileNotFoundError(f"Missing required checkpoint for Pure MAPPO across {ckpt_dirs}!")
     agents["mappo_pure"] = mappo_pure
     agents["mappo"] = mappo_pure  # Backward-compatible alias
 
     # 2. APF-Assisted Residual MAPPO (Variant B: Nominal APF 2.0 + Learned Policy 0.4)
     mappo_residual = MAPPOAgent(env.obs_dim, env.state_dim, num_uavs, num_uavs + 1, cfg.mappo.hidden_dim, policy_variant="residual", device=dev)
     loaded_residual = False
-    for ckpt in [os.path.join(ckpt_dir, "best_mappo_residual_agent.pt"), os.path.join(ckpt_dir, "final_mappo_residual_agent.pt")]:
-        if os.path.exists(ckpt):
-            mappo_residual.load_checkpoint(ckpt)
-            print(f"[Loaded Checkpoint] Residual MAPPO from {ckpt}")
-            loaded_residual = True
-            break
-    if not loaded_residual and strict_ckpts:
-        raise FileNotFoundError(f"Missing required checkpoint for Residual MAPPO in {ckpt_dir}!")
+    res_p = find_ckpt(["best_mappo_residual_agent.pt", "final_mappo_residual_agent.pt"])
+    if res_p:
+        mappo_residual.load_checkpoint(res_p)
+        print(f"[Loaded Checkpoint] Residual MAPPO from {res_p}")
+        loaded_residual = True
+    elif strict_ckpts and model_filter in ["all", "mappo", "mappo_residual"]:
+        raise FileNotFoundError(f"Missing required checkpoint for Residual MAPPO across {ckpt_dirs}!")
+    agents["mappo_residual"] = mappo_residual
     agents["mappo_residual"] = mappo_residual
 
     # 2b. Undamped Residual MAPPO (Historical comparison ablation demonstrating post-arrival limit cycles)
@@ -325,42 +338,37 @@ def run_evaluation(
     # 4. Independent PPO (IPPO, DTDE)
     ippo = IPPOAgent(env.obs_dim, num_uavs, num_uavs + 1, cfg.mappo.hidden_dim, policy_variant="pure", device=dev)
     loaded_ippo = False
-    for ckpt in [os.path.join(ckpt_dir, "best_ippo_pure_agent.pt"), os.path.join(ckpt_dir, "final_ippo_pure_agent.pt"),
-                 os.path.join(ckpt_dir, "best_ippo_agent.pt")]:
-        if os.path.exists(ckpt):
-            ippo.load_checkpoint(ckpt)
-            print(f"[Loaded Checkpoint] IPPO from {ckpt}")
-            loaded_ippo = True
-            break
-    if not loaded_ippo and strict_ckpts:
-        raise FileNotFoundError(f"Missing required checkpoint for IPPO in {ckpt_dir}!")
+    ippo_p = find_ckpt(["best_ippo_pure_agent.pt", "final_ippo_pure_agent.pt", "best_ippo_agent.pt", "final_ippo_agent.pt"])
+    if ippo_p:
+        ippo.load_checkpoint(ippo_p)
+        print(f"[Loaded Checkpoint] IPPO from {ippo_p}")
+        loaded_ippo = True
+    elif strict_ckpts and model_filter in ["all", "ippo", "marl"]:
+        raise FileNotFoundError(f"Missing required checkpoint for IPPO across {ckpt_dirs}!")
     agents["ippo"] = ippo
 
     # 5. Multi-Agent DDPG (MADDPG)
     maddpg = MADDPGAgent(env.obs_dim, env.state_dim, num_uavs, num_uavs + 1, cfg.mappo.hidden_dim, policy_variant="pure", device=dev)
     loaded_maddpg = False
-    for ckpt in [os.path.join(ckpt_dir, "best_maddpg_pure_agent.pt"), os.path.join(ckpt_dir, "final_maddpg_pure_agent.pt"),
-                 os.path.join(ckpt_dir, "best_maddpg_agent.pt")]:
-        if os.path.exists(ckpt):
-            maddpg.load_checkpoint(ckpt)
-            print(f"[Loaded Checkpoint] MADDPG from {ckpt}")
-            loaded_maddpg = True
-            break
-    if not loaded_maddpg and strict_ckpts:
-        raise FileNotFoundError(f"Missing required checkpoint for MADDPG in {ckpt_dir}!")
+    maddpg_p = find_ckpt(["best_maddpg_pure_agent.pt", "final_maddpg_pure_agent.pt", "best_maddpg_agent.pt", "final_maddpg_agent.pt"])
+    if maddpg_p:
+        maddpg.load_checkpoint(maddpg_p)
+        print(f"[Loaded Checkpoint] MADDPG from {maddpg_p}")
+        loaded_maddpg = True
+    elif strict_ckpts and model_filter in ["all", "maddpg", "marl"]:
+        raise FileNotFoundError(f"Missing required checkpoint for MADDPG across {ckpt_dirs}!")
     agents["maddpg"] = maddpg
 
     # 6. Centralized PPO (CPPO)
     cppo = CPPOAgent(env.state_dim, num_uavs, num_uavs + 1, cfg.mappo.hidden_dim, device=dev)
     loaded_cppo = False
-    for ckpt in [os.path.join(ckpt_dir, "best_cppo_agent.pt"), os.path.join(ckpt_dir, "final_cppo_agent.pt")]:
-        if os.path.exists(ckpt):
-            cppo.load_checkpoint(ckpt)
-            print(f"[Loaded Checkpoint] CPPO from {ckpt}")
-            loaded_cppo = True
-            break
-    if not loaded_cppo and strict_ckpts:
-        raise FileNotFoundError(f"Missing required checkpoint for CPPO in {ckpt_dir}!")
+    cppo_p = find_ckpt(["best_cppo_agent.pt", "final_cppo_agent.pt"])
+    if cppo_p:
+        cppo.load_checkpoint(cppo_p)
+        print(f"[Loaded Checkpoint] CPPO from {cppo_p}")
+        loaded_cppo = True
+    elif strict_ckpts and model_filter in ["all", "cppo", "marl"]:
+        raise FileNotFoundError(f"Missing required checkpoint for CPPO across {ckpt_dirs}!")
     agents["cppo"] = cppo
 
     # 7. Classical & Heuristic Baselines and Matched Ablations
@@ -370,17 +378,17 @@ def run_evaluation(
     agents["astar_greedy"] = AStarJointBaseline(env, EnergyDeadlineAwareGreedyPolicy(queue_aware=True))
     agents["astar_latency"] = AStarJointBaseline(env, LowestLatencyPolicy(queue_aware=True))
     agents["astar_pure_pursuit"] = HybridAStarMAPPONavigator(env, mappo_agent=None, residual_weight=0.0)
-    agents["hybrid_astar_mappo_zero"] = HybridAStarMAPPONavigator(env, mappo_agent=mappo_residual, residual_weight=0.0)
-    agents["hybrid_astar_mappo_res02"] = HybridAStarMAPPONavigator(env, mappo_agent=mappo_residual, residual_weight=0.2, apply_terminal_damping=True)
-    agents["hybrid_astar_mappo_res05"] = HybridAStarMAPPONavigator(env, mappo_agent=mappo_residual, residual_weight=0.5, apply_terminal_damping=True)
+    agents["hybrid_astar_mappo_zero"] = HybridAStarMAPPONavigator(env, mappo_agent=mappo_residual if loaded_residual else None, residual_weight=0.0)
+    agents["hybrid_astar_mappo_res02"] = HybridAStarMAPPONavigator(env, mappo_agent=mappo_residual if loaded_residual else None, residual_weight=0.2, apply_terminal_damping=True)
+    agents["hybrid_astar_mappo_res05"] = HybridAStarMAPPONavigator(env, mappo_agent=mappo_residual if loaded_residual else None, residual_weight=0.5, apply_terminal_damping=True)
     agents["hybrid_astar_mappo"] = agents["hybrid_astar_mappo_zero"]
     agents["local_only"] = agents["astar_local"]
     agents["edge_only"] = agents["astar_edge"]
     agents["random"] = agents["astar_random"]
     agents["astar"] = agents["astar_edge"]
 
-    # Model evaluation suite
-    methods_meta = [
+    # Model evaluation suite candidate list
+    all_methods_meta = [
         ("3D A* + Edge MEC (Primary Classical Benchmark)", "astar_edge"),
         ("3D A* + Pure Pursuit (Zero RL Baseline)", "astar_pure_pursuit"),
         ("Hierarchical 3D A* + Pure Pursuit + MAPPO (Offload Only, k_rl=0.0)", "hybrid_astar_mappo_zero"),
@@ -394,6 +402,40 @@ def run_evaluation(
         ("Multi-Agent DDPG (MADDPG)", "maddpg"),
         ("Centralized PPO (CPPO, CTCE)", "cppo"),
     ]
+
+    # Filter evaluation methods based on model_filter and checkpoint readiness
+    methods_meta = []
+    for label, key in all_methods_meta:
+        if model_filter != "all":
+            if model_filter == "mappo" and not ("mappo" in key or "hybrid" in key or "astar" in key):
+                continue
+            elif model_filter == "mappo_pure" and not (key in ["mappo_pure", "astar_edge", "astar_pure_pursuit"]):
+                continue
+            elif model_filter == "mappo_residual" and not (key in ["mappo_residual", "hybrid_astar_mappo_zero", "hybrid_astar_mappo_res02", "astar_edge", "astar_pure_pursuit"]):
+                continue
+            elif model_filter == "baselines" and not (key.startswith("astar_") or key.startswith("local_") or key.startswith("edge_")):
+                continue
+            elif model_filter == "marl" and key.startswith("astar_"):
+                continue
+
+        # Check RL checkpoint availability when running in non-strict mode
+        if key == "mappo_pure" and not loaded_pure:
+            print(f"[Notice] Skipping '{label}': Pure MAPPO checkpoint not found.")
+            continue
+        if key in ["mappo_residual", "mappo_residual_undamped", "mappo_apf_only"] and not loaded_residual:
+            print(f"[Notice] Skipping '{label}': Residual MAPPO checkpoint not found.")
+            continue
+        if key == "ippo" and not loaded_ippo:
+            print(f"[Notice] Skipping '{label}': IPPO checkpoint not found.")
+            continue
+        if key == "maddpg" and not loaded_maddpg:
+            print(f"[Notice] Skipping '{label}': MADDPG checkpoint not found.")
+            continue
+        if key == "cppo" and not loaded_cppo:
+            print(f"[Notice] Skipping '{label}': CPPO checkpoint not found.")
+            continue
+
+        methods_meta.append((label, key))
 
     print(f"\nRunning standardized multi-seed evaluation across {len(test_seeds)} seeds: {test_seeds}")
     detailed_records = []
@@ -563,17 +605,23 @@ def run_evaluation(
             )
 
             multi_curve_path = os.path.join(fig_dir, "multimodel_performance_curves.png")
-            plot_multimodel_curves(
-                results={
-                    "mappo": first_seed_results.get("mappo_residual", first_seed_results["mappo_pure"]),
-                    "ippo": first_seed_results["ippo"],
-                    "maddpg": first_seed_results["maddpg"],
-                    "astar": first_seed_results["astar_edge"]
-                },
-                obstacles=cfg.airspace.obstacles,
-                stations=env.stations,
-                save_path=multi_curve_path
-            )
+            avail_curves = {}
+            for k in ["mappo", "ippo", "maddpg", "astar"]:
+                if k in first_seed_results:
+                    avail_curves[k] = first_seed_results[k]
+                elif k == "mappo" and "mappo_residual" in first_seed_results:
+                    avail_curves["mappo"] = first_seed_results["mappo_residual"]
+                elif k == "mappo" and "mappo_pure" in first_seed_results:
+                    avail_curves["mappo"] = first_seed_results["mappo_pure"]
+                elif k == "astar" and "astar_edge" in first_seed_results:
+                    avail_curves["astar"] = first_seed_results["astar_edge"]
+            if len(avail_curves) >= 2:
+                plot_multimodel_curves(
+                    results=avail_curves,
+                    obstacles=cfg.airspace.obstacles,
+                    stations=env.stations,
+                    save_path=multi_curve_path
+                )
 
             # Figure 6: Offloading Distribution
             offload_dict = {row["Method"]: {"local": row["Local (%)"], "peer": row["Peer (%)"], "edge": row["Edge (%)"]}
@@ -585,7 +633,7 @@ def run_evaluation(
 
             # Figure 9: 3D Trajectories
             plot_3d_flight_trajectories(
-                eval_results={"mappo": first_seed_results.get("mappo_residual", first_seed_results["mappo_pure"]), "astar": first_seed_results["astar_edge"]},
+                eval_results={"mappo": first_seed_results.get("mappo_residual", first_seed_results.get("mappo_pure", None)), "astar": first_seed_results.get("astar_edge", None)},
                 obstacles=cfg.airspace.obstacles,
                 stations=env.stations,
                 save_path=os.path.join(fig_dir, "3d_flight_trajectories.png")
@@ -597,7 +645,8 @@ def run_evaluation(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Multi-Model Scientific Evaluation")
-    parser.add_argument("--device", type=str, default="auto", choices=["auto", "cuda", "cpu"])
+    parser.add_argument("--device", type=str, default="auto", choices=["auto", "cuda", "cpu", "mps"])
+    parser.add_argument("--model", type=str, default="all", choices=["all", "mappo", "mappo_pure", "mappo_residual", "baselines", "marl"], help="Subset of methods to evaluate")
     parser.add_argument("--num_seeds", type=int, default=5, help="Number of held-out test seeds")
     parser.add_argument("--output_dir", type=str, default="results", help="Directory to save audit evaluation results")
     parser.add_argument("--strict_ckpts", action="store_true", default=True, help="Enforce strict checkpoint presence")
@@ -606,4 +655,4 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     seeds = [101 + i for i in range(args.num_seeds)]
-    run_evaluation(test_seeds=seeds, device=args.device, output_dir=args.output_dir, strict_ckpts=args.strict_ckpts, save_plots=args.save_plots)
+    run_evaluation(test_seeds=seeds, device=args.device, output_dir=args.output_dir, strict_ckpts=args.strict_ckpts, save_plots=args.save_plots, model_filter=args.model)

@@ -5,6 +5,11 @@ Zero bar graphs.
 """
 
 import os
+import sys
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if BASE_DIR not in sys.path:
+    sys.path.insert(0, BASE_DIR)
+
 import numpy as np
 import pandas as pd
 import matplotlib
@@ -204,9 +209,11 @@ def plot_training_convergence(csv_path: str, save_path: str):
     plt.suptitle("Figure 1: Joint MAPPO Training Convergence & Multi-Objective Performance", fontsize=13, fontweight='bold')
     plt.tight_layout()
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
-    plt.savefig(save_path, dpi=300)
+    plt.savefig(save_path, dpi=300, bbox_inches="tight")
+    pdf_path = os.path.splitext(save_path)[0] + ".pdf"
+    plt.savefig(pdf_path, format="pdf", bbox_inches="tight")
     plt.close()
-    print(f"[Plotter] Saved training convergence curves figure: {save_path}")
+    print(f"[Plotter] Saved training convergence curves figure:\n  -> {save_path}\n  -> {pdf_path}")
 
 def plot_aerodynamic_power_curve(aero_model, save_path: str):
     """
@@ -237,9 +244,11 @@ def plot_aerodynamic_power_curve(aero_model, save_path: str):
 
     plt.tight_layout()
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
-    plt.savefig(save_path, dpi=300)
+    plt.savefig(save_path, dpi=300, bbox_inches="tight")
+    pdf_path = os.path.splitext(save_path)[0] + ".pdf"
+    plt.savefig(pdf_path, format="pdf", bbox_inches="tight")
     plt.close()
-    print(f"[Plotter] Saved aerodynamic power curve figure: {save_path}")
+    print(f"[Plotter] Saved aerodynamic power curve figure:\n  -> {save_path}\n  -> {pdf_path}")
 
 def plot_multimodel_curves(results: dict, obstacles: list, stations: dict, save_path: str):
     """
@@ -693,12 +702,12 @@ def plot_pareto_latency_energy(results_dict: dict, save_path: str):
     """
     Plots Latency vs Energy Multi-Objective Pareto Trade-Off Curve.
     Strictly adheres to IEEE Transactions on Wireless Communications / Robotics standards:
-    - Standard column sizing (6.2 x 4.5 inches)
+    - Standard sizing (9.2 x 5.2 inches with reserved legend sidebar)
     - Serif typography (DejaVu Serif / Times New Roman)
-    - Empirical Pareto-optimal non-dominated frontier curve
-    - Distinct, colorblind-friendly geometric markers and colors
-    - Clean compact IEEE legend in upper right
-    - Saves both high-res 300 DPI PNG and vector PDF
+    - Empirical Pareto-optimal non-dominated frontier curve P*
+    - Distinct, colorblind-friendly geometric markers and colors for every method
+    - Unobstructed IEEE legend positioned outside plot axes on the right (zero data point collision)
+    - Saves both high-res 350 DPI PNG and vector PDF
     """
     plt.rcParams.update({
         "font.family": "serif",
@@ -711,50 +720,59 @@ def plot_pareto_latency_energy(results_dict: dict, save_path: str):
         "grid.color": "#CBD5E1",
     })
 
-    fig, ax = plt.subplots(figsize=(6.4, 4.6), dpi=300)
+    fig, ax = plt.subplots(figsize=(9.2, 5.2), dpi=350)
 
-    # Standard IEEE publication color palette
-    colors = {
-        "mappo_residual": "#1D4ED8",  # Royal Blue
-        "mappo_pure": "#0284C7",      # Cyan Blue
-        "mappo": "#1D4ED8",
-        "cppo": "#0D9488",            # Teal
-        "ippo": "#059669",            # Emerald
-        "maddpg": "#7C3AED",          # Purple
-        "astar_greedy": "#DC2626",    # Red
-        "astar_latency": "#EA580C",   # Orange
-        "local_only": "#64748B",      # Slate
-        "edge_only": "#D97706",       # Amber
-        "random": "#94A3B8"           # Gray
-    }
-
-    markers = {
-        "mappo_residual": "*",
-        "mappo_pure": "o",
-        "mappo": "*",
-        "cppo": "s",
-        "ippo": "^",
-        "maddpg": "D",
-        "astar_greedy": "v",
-        "astar_latency": "P",
-        "local_only": "X",
-        "edge_only": "p",
-        "random": "h"
-    }
+    # Robust semantic styling resolver based on method name
+    def get_style(name: str):
+        l = name.lower()
+        if "residual" in l or "apf-assisted" in l or "nominal+residual" in l:
+            return "#1D4ED8", "*", 220, "APF-Assisted Residual MAPPO (Proposed)", 10
+        if "pure mappo" in l or ("mappo" in l and "residual" not in l and "hybrid" not in l and "astar" not in l):
+            return "#0284C7", "o", 90, "Pure MAPPO (No APF Guidance)", 8
+        if "cppo" in l or "centralized" in l:
+            return "#0D9488", "s", 90, "Centralized PPO (CPPO, CTCE)", 9
+        if "ippo" in l or "independent" in l:
+            return "#059669", "^", 90, "Independent PPO (IPPO, DTDE)", 7
+        if "maddpg" in l:
+            return "#7C3AED", "D", 85, "Multi-Agent DDPG (MADDPG)", 6
+        if "energy-deadline" in l or "classical benchmark" in l:
+            return "#DC2626", "v", 90, "3D A* + Energy-Deadline MEC (Classical)", 5
+        if "lowest-latency" in l:
+            return "#EA580C", "P", 95, "3D A* + Lowest-Latency MEC", 5
+        if "local-only" in l:
+            return "#64748B", "X", 85, "3D A* + Local-Only Execution", 4
+        if "edge-only" in l:
+            return "#D97706", "p", 90, "3D A* + Edge-Only Execution", 4
+        if "random" in l:
+            return "#94A3B8", "h", 85, "3D A* + Random Feasible MEC", 3
+        return "#334155", "o", 80, name, 2
 
     # Extract evaluated points
     pts = []
     for k, v in results_dict.items():
         lat = float(v.get("latency", 0.0))
         ene_kj = float(v.get("energy", 0.0)) / 1000.0
-        lbl = v.get("label", k)
-        c = colors.get(k, "#334155")
-        m = markers.get(k, "o")
-        s = 110 if m in ["*", "D"] else 70
-        pts.append({"key": k, "lat": lat, "ene": ene_kj, "lbl": lbl, "color": c, "marker": m, "size": s})
+        raw_name = v.get("label", k)
+        c, m, s, clean_lbl, z = get_style(raw_name)
+        pts.append({
+            "key": k,
+            "raw": raw_name,
+            "lat": lat,
+            "ene": ene_kj,
+            "lbl": clean_lbl,
+            "color": c,
+            "marker": m,
+            "size": s,
+            "zorder": z
+        })
 
-    # Compute Pareto frontier (minimizing both latency and energy)
-    sorted_pts = sorted(pts, key=lambda p: p["lat"])
+    if not pts:
+        print("[Plotter] Warning: No points provided for Pareto trade-off curve.")
+        plt.close()
+        return
+
+    # Compute true empirical Pareto-optimal frontier (minimizing both latency and energy)
+    sorted_pts = sorted(pts, key=lambda p: (p["lat"], p["ene"]))
     frontier = []
     min_ene = float("inf")
     for p in sorted_pts:
@@ -762,38 +780,52 @@ def plot_pareto_latency_energy(results_dict: dict, save_path: str):
             frontier.append(p)
             min_ene = p["ene"]
 
-    # Draw Pareto-optimal frontier line
+    # Draw Pareto-optimal non-dominated frontier line
     if len(frontier) >= 2:
         fx = [p["lat"] for p in frontier]
         fy = [p["ene"] for p in frontier]
-        ax.plot(fx, fy, linestyle="--", color="#1E3A8A", linewidth=1.4, alpha=0.85, zorder=3,
+        ax.plot(fx, fy, linestyle="--", color="#1E3A8A", linewidth=1.8, alpha=0.95, zorder=4,
                 label=r"Pareto Frontier $\mathcal{P}^*$")
+        # Highlight dominant vertices on Pareto boundary
+        for p in frontier:
+            ax.scatter([p["lat"]], [p["ene"]], facecolors="none", edgecolors="#1D4ED8",
+                       s=p["size"] + 140, linewidths=1.8, linestyle="--", zorder=5)
+    elif len(frontier) == 1:
+        p_opt = frontier[0]
+        ax.scatter([p_opt["lat"]], [p_opt["ene"]], facecolors="none", edgecolors="#1D4ED8",
+                   s=300, linewidths=2.0, linestyle="--", zorder=5,
+                   label=r"Strict Dominant Point $\mathcal{P}^*$")
 
-    # Plot policy scatter points
-    for p in pts:
+    # Plot policy scatter points (higher z-order for proposed and dominant methods)
+    for p in sorted(pts, key=lambda item: item["zorder"]):
         ax.scatter(p["lat"], p["ene"], color=p["color"], s=p["size"], marker=p["marker"],
-                   edgecolors="#0F172A", linewidth=0.7, zorder=5, label=p["lbl"])
+                   edgecolors="#0F172A", linewidth=0.9, zorder=p["zorder"] + 6, label=p["lbl"])
 
-    # Clean axes styling
-    ax.set_xlabel(r"Mean Fleet Task Latency $T_{\mathrm{delay}}$ (s)", fontsize=10, labelpad=6)
-    ax.set_ylabel(r"Fleet Cumulative Energy $E_{\mathrm{fleet}}$ (kJ)", fontsize=10, labelpad=6)
+    # Limits and grid
+    ax.set_xlim(180, 246)
+    ax.set_ylim(53.5, 68.5)
+    ax.set_xlabel(r"Mean Fleet Task Delay / Latency $T_{\mathrm{delay}}$ (s)", fontsize=10.5, labelpad=7)
+    ax.set_ylabel(r"Fleet Cumulative Energy Consumption $E_{\mathrm{fleet}}$ (kJ)", fontsize=10.5, labelpad=7)
     ax.set_title(r"Multi-Objective Pareto Trade-Off: Task Latency vs. Fleet Energy",
-                 fontsize=11, fontweight="bold", pad=8)
+                 fontsize=12, fontweight="bold", pad=12)
     ax.grid(True, linestyle=":", alpha=0.55)
 
-    # Clean IEEE Legend inside upper right
+    # Position clean IEEE Legend OUTSIDE on the right (100% collision-free)
     ax.legend(
-        loc="upper right",
+        loc="upper left",
+        bbox_to_anchor=(1.03, 1.0),
         frameon=True,
-        framealpha=0.92,
+        framealpha=0.96,
         edgecolor="#CBD5E1",
-        fontsize=8.0,
-        ncol=1
+        fontsize=8.5,
+        ncol=1,
+        borderpad=0.7,
+        labelspacing=0.52
     )
 
     plt.tight_layout()
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
-    plt.savefig(save_path, dpi=300, bbox_inches="tight")
+    plt.savefig(save_path, dpi=350, bbox_inches="tight")
 
     # Vector PDF export
     pdf_path = os.path.splitext(save_path)[0] + ".pdf"
@@ -993,5 +1025,75 @@ def plot_all_marl_training_convergence(csv_dict: dict, save_path: str):
     plt.savefig(pdf_path, format="pdf", bbox_inches="tight")
     plt.close()
     print(f"[Plotter] Saved MARL training convergence figure:\n  -> {save_path}\n  -> {pdf_path}")
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Multi-UAV DRL Training Curves & Diagnostics Plotter")
+    parser.add_argument("--log", type=str, default=None, help="Path to specific training log CSV")
+    parser.add_argument("--results_dir", type=str, default=None, help="Results directory (default: research_v2/results)")
+    parser.add_argument("--output_dir", type=str, default=None, help="Output directory for figures (default: results/figures)")
+    parser.add_argument("--all", action="store_true", default=True, help="Generate all available convergence curves")
+    args = parser.parse_args()
+
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    res_dir = args.results_dir or os.path.join(base_dir, "results")
+    fig_dir = args.output_dir or os.path.join(res_dir, "figures")
+    os.makedirs(fig_dir, exist_ok=True)
+
+    print("=" * 78)
+    print(" GENERATING PUBLICATION TRAINING CONVERGENCE FIGURES")
+    print("=" * 78)
+
+    # 1. Aerodynamic Power Curve
+    try:
+        from env.aerodynamics import AerodynamicsModel
+        aero = AerodynamicsModel()
+        aero_path = os.path.join(fig_dir, "aerodynamic_power_curve.png")
+        plot_aerodynamic_power_curve(aero, aero_path)
+    except Exception as e:
+        print(f"[Warning] Could not generate aerodynamic power curve: {e}")
+
+    # 2. Specific log if provided
+    if args.log:
+        if os.path.exists(args.log):
+            fname = os.path.splitext(os.path.basename(args.log))[0]
+            out_name = f"{fname}_curves.png"
+            plot_training_convergence(args.log, os.path.join(fig_dir, out_name))
+        else:
+            print(f"[Error] Specified log not found: {args.log}")
+
+    # 3. Auto-discover all training logs in results_dir
+    candidate_logs = [
+        "training_logs_mappo_pure.csv",
+        "training_logs_mappo_residual.csv",
+        "training_logs_mappo.csv",
+        "training_logs_ippo_pure.csv",
+        "training_logs_ippo_residual.csv",
+        "training_logs_maddpg_pure.csv",
+        "training_logs_maddpg_residual.csv",
+        "training_logs_cppo.csv",
+        "training_logs.csv",
+    ]
+
+    for c_log in candidate_logs:
+        full_p = os.path.join(res_dir, c_log)
+        if os.path.exists(full_p):
+            tag = c_log.replace(".csv", "")
+            out_p = os.path.join(fig_dir, f"{tag}_curves.png")
+            plot_training_convergence(full_p, out_p)
+
+    # 4. Comparative multi-MARL convergence plot
+    csv_dict = {
+        "mappo": os.path.join(res_dir, "training_logs_mappo_pure.csv" if os.path.exists(os.path.join(res_dir, "training_logs_mappo_pure.csv")) else "training_logs_mappo.csv"),
+        "ippo": os.path.join(res_dir, "training_logs_ippo_pure.csv" if os.path.exists(os.path.join(res_dir, "training_logs_ippo_pure.csv")) else "training_logs_ippo.csv"),
+        "maddpg": os.path.join(res_dir, "training_logs_maddpg_pure.csv" if os.path.exists(os.path.join(res_dir, "training_logs_maddpg_pure.csv")) else "training_logs_maddpg.csv"),
+        "cppo": os.path.join(res_dir, "training_logs_cppo.csv")
+    }
+    marl_comp_path = os.path.join(fig_dir, "marl_training_convergence_comparison.png")
+    plot_all_marl_training_convergence(csv_dict, marl_comp_path)
+    print("\n[Done] All training convergence figures successfully rendered!")
+
 
 

@@ -64,6 +64,8 @@ def regenerate_all_figures():
 
     # 3. Benchmark Summary & Pareto Curve
     bench_csv = os.path.join(res_dir, "benchmark_summary.csv")
+    if not os.path.exists(bench_csv):
+        bench_csv = os.path.join(res_dir, "benchmarks", "benchmark_summary.csv")
     if os.path.exists(bench_csv):
         df_bench = pd.read_csv(bench_csv)
         print(f"[Loaded] Benchmark summary from {bench_csv}")
@@ -84,7 +86,7 @@ def regenerate_all_figures():
         pareto_data = {}
         for _, row in df_bench.iterrows():
             m_name = str(row["Method"])
-            lat = _parse_val(row.get("Total Delay (s)", row.get("Total Latency / Delay (s)", 20.0)))
+            lat = _parse_val(row.get("Delay (s)", row.get("Total Delay (s)", row.get("Total Latency / Delay (s)", 20.0))))
             # Check if columns indicate kJ or J
             if "Total Energy (kJ)" in row:
                 ene_val = _parse_val(row["Total Energy (kJ)"]) * 1000.0
@@ -103,6 +105,8 @@ def regenerate_all_figures():
 
     # 4. Offloading Distribution Breakdown
     offload_csv = os.path.join(res_dir, "offloading_distribution.csv")
+    if not os.path.exists(offload_csv):
+        offload_csv = os.path.join(res_dir, "benchmarks", "offloading_distribution.csv")
     if os.path.exists(offload_csv):
         df_off = pd.read_csv(offload_csv)
         offload_dict = {}
@@ -117,6 +121,8 @@ def regenerate_all_figures():
 
     # 5. Ablation Study Breakdown
     ablation_csv = os.path.join(res_dir, "ablation_summary.csv")
+    if not os.path.exists(ablation_csv):
+        ablation_csv = os.path.join(res_dir, "benchmarks", "ablation_summary.csv")
     if os.path.exists(ablation_csv):
         df_abl = pd.read_csv(ablation_csv)
         ablation_dict = {}
@@ -131,7 +137,11 @@ def regenerate_all_figures():
 
     # 6. 3D UAV Trajectory Comparison (PNG & Vector PDF)
     traj_csv = os.path.join(res_dir, "trajectory_records.csv")
+    if not os.path.exists(traj_csv):
+        traj_csv = os.path.join(res_dir, "metropolis_trajectory_records.csv")
     nav_csv = os.path.join(res_dir, "navigation_benchmark.csv")
+    if not os.path.exists(nav_csv):
+        nav_csv = os.path.join(res_dir, "benchmarks", "navigation_benchmark.csv")
     if os.path.exists(traj_csv) and os.path.exists(nav_csv):
         from plots.render_publication_figures import plot_publication_3d_trajectory_benchmark
         df_traj = pd.read_csv(traj_csv)
