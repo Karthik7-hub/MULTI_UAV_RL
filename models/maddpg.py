@@ -18,6 +18,14 @@ import torch.nn.functional as F
 import numpy as np
 from typing import Dict, Tuple
 
+from env.observation_builder import (
+    OBS_DIM,
+    NAV_FEATURE_INDICES,
+    NAV_DIM,
+    OFFLOAD_FEATURE_INDICES,
+    OFFLOAD_DIM
+)
+
 class MADDPGActor(nn.Module):
     def __init__(
         self,
@@ -30,11 +38,11 @@ class MADDPGActor(nn.Module):
         super().__init__()
         self.max_disp = max_disp
         self.policy_variant = policy_variant.lower()
-        # Two-Stream Decoupled Architecture for MADDPG:
-        self.nav_indices = list(range(0, 10)) + list(range(14, 20))
-        self.nav_dim = len(self.nav_indices) if obs_dim == 20 else obs_dim
-        self.offload_indices = list(range(0, 3)) + list(range(10, 17))
-        self.offload_dim = len(self.offload_indices) if obs_dim == 20 else obs_dim
+        # Authoritative Two-Stream Decoupled Architecture for MADDPG:
+        self.nav_indices = NAV_FEATURE_INDICES
+        self.nav_dim = NAV_DIM  # 18 dims
+        self.offload_indices = OFFLOAD_FEATURE_INDICES
+        self.offload_dim = OFFLOAD_DIM  # 10 dims
 
         self.nav_backbone = nn.Sequential(
             nn.Linear(self.nav_dim, hidden_dim),
@@ -86,12 +94,8 @@ class MADDPGActor(nn.Module):
         return torch.cat([combined_xy, combined_z], dim=-1)
 
     def forward(self, obs: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        if obs.shape[-1] == 20:
-            nav_feat = obs[..., self.nav_indices]
-            offload_feat = obs[..., self.offload_indices]
-        else:
-            nav_feat = obs
-            offload_feat = obs
+        nav_feat = obs[..., self.nav_indices]
+        offload_feat = obs[..., self.offload_indices]
         nav_h = self.nav_backbone(nav_feat)
         offload_h = self.offload_backbone(offload_feat)
         learned_move = self.move_head(nav_h)

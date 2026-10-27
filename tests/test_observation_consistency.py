@@ -1,10 +1,10 @@
 """
 Test Suite: Observation Consistency Between Training Environment and Inference.
 Verifies:
-1. Shape contract (exactly 20 dimensions).
+1. Shape contract (canonical 22 dimensions).
 2. Normalization bounds and feature scales.
 3. Parity between MultiUAVEnv._get_observations() and build_single_uav_obs().
-4. Correctness of obstacle vector, peer distances, and edge RF rate.
+4. Correctness of obstacle vector, peer distances, edge RF rate, and clearance tangent.
 5. Safe failure when invalid inputs are provided.
 """
 
@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 from config import MasterConfig
 from env.multi_uav_env import MultiUAVEnv
-from env.observation_builder import build_single_uav_obs, compute_data_rate_to_edge
+from env.observation_builder import build_single_uav_obs, compute_data_rate_to_edge, OBS_DIM
 
 def test_obs_shape_and_dtype():
     pos = np.array([50.0, 50.0, 30.0], dtype=np.float32)
@@ -23,7 +23,8 @@ def test_obs_shape_and_dtype():
 
     obs = build_single_uav_obs(pos, vel, station, edge, obs_list)
     assert isinstance(obs, np.ndarray)
-    assert obs.shape == (20,)
+    assert obs.shape == (OBS_DIM,)
+    assert obs.shape == (22,)
     assert obs.dtype == np.float32
 
 def test_obs_normalization_ranges():
@@ -58,6 +59,8 @@ def test_obs_normalization_ranges():
     assert abs(obs[19] - 0.6) < 1e-4
     # Obstacle direction: points towards (140, 100) from (100, 100) -> [1.0, 0.0]
     np.testing.assert_allclose(obs[17:19], [1.0, 0.0], atol=1e-4)
+    # Tangent features (indices 20:22)
+    assert np.linalg.norm(obs[20:22]) <= 1.01
 
 def test_multi_uav_env_parity():
     cfg = MasterConfig()
@@ -85,7 +88,7 @@ def test_multi_uav_env_parity():
             comm_model=env.comm,
             v_max=cfg.physics.v_max,
             airspace_bound=200.0,
-            num_peers_expected=env.num_uavs - 1
+            num_peers_expected=env.num_uavs - 1,
         )
 
         np.testing.assert_allclose(
@@ -93,3 +96,4 @@ def test_multi_uav_env_parity():
             rtol=1e-5, atol=1e-5,
             err_msg=f"Discrepancy found between MultiUAVEnv and build_single_uav_obs for UAV {j}"
         )
+

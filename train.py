@@ -126,13 +126,21 @@ def train_mappo(
 ) -> str:
     dev = DeviceManager.select_device(device)
     tag = save_tag or (f"mappo_{policy_variant}_{ablation}" if ablation else f"mappo_{policy_variant}")
-    DeviceManager.print_diagnostics(
-        dev, seed=seed,
-        extra_config={"Algorithm": "Proposed Joint MAPPO", "Variant": policy_variant, "Ablation": str(ablation), "Episodes": num_episodes, "Curriculum": curriculum}
-    )
 
     cfg = MasterConfig()
     cfg.mappo.num_episodes = num_episodes
+
+    DeviceManager.print_diagnostics(
+        dev, seed=seed,
+        extra_config={
+            "Algorithm": "Proposed Joint MAPPO",
+            "Variant": policy_variant,
+            "Ablation": str(ablation),
+            "Episodes": num_episodes,
+            "Curriculum": curriculum
+        }
+    )
+
     env = MultiUAVEnv(cfg)
 
     agent = MAPPOAgent(

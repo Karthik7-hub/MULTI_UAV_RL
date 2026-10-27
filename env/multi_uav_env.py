@@ -12,7 +12,12 @@ from config import MasterConfig
 from env.aerodynamics import AerodynamicsModel
 from env.comms_compute import WirelessChannelModel, ComputationManager, TaskGenerator
 from env.safety_filter import SafetyFilter
-from env.observation_builder import build_single_uav_obs
+from env.observation_builder import (
+    build_single_uav_obs,
+    compute_obstacle_clearance_tangent,
+    OBS_DIM,
+    STATE_DIM_PER_UAV
+)
 
 class MultiUAVEnv(gym.Env):
     metadata = {"render_modes": ["human"]}
@@ -21,6 +26,11 @@ class MultiUAVEnv(gym.Env):
         super().__init__()
         self.cfg = cfg or MasterConfig()
         self.num_uavs = self.cfg.physics.num_uavs
+        if self.num_uavs != 4:
+            raise ValueError(
+                f"MultiUAVEnv canonical Two-Stream architecture strictly enforces fleet size N=4 "
+                f"(3 peer distances, 5 offload actions, 40-dim critic state). Got num_uavs={self.num_uavs}."
+            )
         self.episode_length = self.cfg.mappo.episode_length
         self.current_step = 0
 
@@ -77,19 +87,16 @@ class MultiUAVEnv(gym.Env):
             }) for j in range(self.num_uavs)
         }
 
-        # Local Observation Space per UAV:
-        # position (3) + velocity (3) + vector_to_station (3) + dist_to_station (1) +
-        # task_features (3) + channel_to_edge (1) + relative_peer_distances (N-1) +
-        # closest_obstacle_vector_and_dist (3)
-        self.obs_dim = 3 + 3 + 3 + 1 + 3 + 1 + (self.num_uavs - 1) + 3
+        # Local Observation Space per UAV: canonical 22-dimensional observation vector
+        self.obs_dim = OBS_DIM
         self.observation_spaces = {
             j: spaces.Box(low=-np.inf, high=np.inf, shape=(self.obs_dim,), dtype=np.float32)
             for j in range(self.num_uavs)
         }
 
         # Centralized Critic Global State Space:
-        # All positions (N*3) + All velocities (N*3) + All distances (N*1) + All tasks (N*3)
-        self.state_dim = self.num_uavs * (3 + 3 + 1 + 3)
+        # All positions (N*3) + All velocities (N*3) + All distances (N*1) + All tasks (N*3) = N * 10
+        self.state_dim = self.num_uavs * STATE_DIM_PER_UAV
 
         # Designated symmetric mission stations (station_radius around center at 50m altitude)
         cx, cy, cz = self.cfg.airspace.mission_center
@@ -285,6 +292,7 @@ class MultiUAVEnv(gym.Env):
         """
         self.current_step += 1
         p_cfg = self.cfg.physics
+        prev_positions = {j: np.copy(self.positions[j]) for j in range(self.num_uavs)}
 
         # Advance persistent computation queues
         self.comp.step_queues(p_cfg.delta_t)
@@ -469,8 +477,20 @@ class MultiUAVEnv(gym.Env):
             curr_d = float(np.linalg.norm(self.positions[j] - self.stations[j]))
             if hasattr(self, "_prev_d_stations") and j in self._prev_d_stations:
                 progress = self._prev_d_stations[j] - curr_d
-                # Strictly potential-based progress shaping: +4.0 * delta d
-                reward_progress += 4.0 * progress
+
+                # Detour-Tolerant Progress Reward:
+                # If Euclidean distance increases during a valid lateral obstacle detour,
+                # neutralize the negative Euclidean penalty and reward tangential progress.
+                disp = self.positions[j] - prev_positions[j]
+                tan = compute_obstacle_clearance_tangent(prev_positions[j], self.stations[j], self.cfg.airspace.obstacles)
+                tan_prog = float(np.dot(disp[:2], tan))
+                tan_active = float(np.linalg.norm(tan)) > 0.5
+
+                if progress < 0.0 and tan_prog > 0.05 and tan_active:
+                    # Neutralize Euclidean penalty during valid obstacle detour and reward tangential progress
+                    reward_progress += 2.0 * tan_prog
+                else:
+                    reward_progress += 4.0 * progress
 
             # Continuous distance penalty to discourage wandering or hovering far from goal
             reward_distance -= 0.02 * (curr_d / 20.0)

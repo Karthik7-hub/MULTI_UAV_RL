@@ -13,29 +13,35 @@ from torch.distributions import Categorical, Normal
 import numpy as np
 from typing import Dict, Tuple, Optional, Any
 
+from env.observation_builder import (
+    OBS_DIM,
+    NAV_FEATURE_INDICES,
+    NAV_DIM,
+    OFFLOAD_FEATURE_INDICES,
+    OFFLOAD_DIM
+)
+
 class ActorNetwork(nn.Module):
     def __init__(
         self,
-        obs_dim: int,
-        num_offload_actions: int,
+        obs_dim: int = OBS_DIM,
+        num_offload_actions: int = 5,
         hidden_dim: int = 128,
         max_disp: float = 15.0,
         policy_variant: str = "pure",  # "pure" (Variant A) or "residual" (Variant B)
         enable_terminal_damping: bool = True
     ):
         super().__init__()
+        self.obs_dim = obs_dim
         self.max_disp = max_disp
         self.policy_variant = policy_variant.lower()
         self.enable_terminal_damping = enable_terminal_damping
-        # Two-Stream Decoupled Architecture:
-        # Schema derived from canonical 20-dim observation builder:
-        # Nav features (16 dims): pos (0:3), vel (3:6), target_vec (6:9), target_dist (9:10), peer_dists (14:17), obs_feat (17:20)
-        # Offload features (10 dims): pos (0:3), task_cycles (10), task_data (11), task_deadline (12), channel_rate (13), peer_dists (14:17)
-        self.nav_indices = list(range(0, 10)) + list(range(14, 20))
-        self.nav_dim = len(self.nav_indices) if obs_dim == 20 else obs_dim
 
-        self.offload_indices = list(range(0, 3)) + list(range(10, 17))
-        self.offload_dim = len(self.offload_indices) if obs_dim == 20 else obs_dim
+        # Authoritative Two-Stream Decoupled Slices:
+        self.nav_indices = NAV_FEATURE_INDICES
+        self.nav_dim = NAV_DIM  # 18 dims: spatial kinematics, stations, peers, obstacles, tangent
+        self.offload_indices = OFFLOAD_FEATURE_INDICES
+        self.offload_dim = OFFLOAD_DIM  # 10 dims: coordinates, task attributes, channel rate, peers
 
         # 1. Dedicated 3D Spatial Navigation Stream
         self.nav_backbone = nn.Sequential(
@@ -46,8 +52,11 @@ class ActorNetwork(nn.Module):
             nn.LayerNorm(hidden_dim),
             nn.Tanh()
         )
+        # Production Movement Head Initialization:
+        # Orthogonal gain = 0.01 for near-zero initial mean velocity;
+        # Log std = 0.5 (sigma = 1.65) for balanced isotropic directional exploration P(v_|| > 0) = 50.4%
         self.move_mean_head = nn.Linear(hidden_dim, 3)
-        self.move_log_std = nn.Parameter(torch.zeros(3) - 0.2)
+        self.move_log_std = nn.Parameter(torch.full((3,), 0.5, dtype=torch.float32))
 
         # 2. Dedicated Task Offloading & MEC Stream
         self.offload_backbone = nn.Sequential(
@@ -60,7 +69,7 @@ class ActorNetwork(nn.Module):
         )
         self.offload_head = nn.Linear(hidden_dim, num_offload_actions)
 
-        # Standard orthogonal layer initialization
+        # Standard orthogonal layer initialization for hidden representations
         for m in self.nav_backbone:
             if isinstance(m, nn.Linear):
                 nn.init.orthogonal_(m.weight, gain=float(np.sqrt(2)))
@@ -70,7 +79,7 @@ class ActorNetwork(nn.Module):
                 nn.init.orthogonal_(m.weight, gain=float(np.sqrt(2)))
                 nn.init.constant_(m.bias, 0.0)
 
-        nn.init.orthogonal_(self.move_mean_head.weight, gain=0.4)
+        nn.init.orthogonal_(self.move_mean_head.weight, gain=0.01)
         nn.init.constant_(self.move_mean_head.bias, 0.0)
         nn.init.orthogonal_(self.offload_head.weight, gain=0.01)
         nn.init.constant_(self.offload_head.bias, 0.0)
@@ -109,12 +118,8 @@ class ActorNetwork(nn.Module):
         return torch.cat([combined_xy, combined_z], dim=-1)
 
     def forward(self, obs: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        if obs.shape[-1] == 20:
-            nav_feat = obs[..., self.nav_indices]
-            offload_feat = obs[..., self.offload_indices]
-        else:
-            nav_feat = obs
-            offload_feat = obs
+        nav_feat = obs[..., self.nav_indices]
+        offload_feat = obs[..., self.offload_indices]
 
         nav_features = self.nav_backbone(nav_feat)
         offload_features = self.offload_backbone(offload_feat)
@@ -275,8 +280,8 @@ class RolloutBuffer:
 class MAPPOAgent:
     def __init__(
         self,
-        obs_dim: int,
-        state_dim: int,
+        obs_dim: int = OBS_DIM,
+        state_dim: int = 40,
         num_uavs: int = 4,
         num_offload_actions: int = 5,
         hidden_dim: int = 128,
@@ -468,14 +473,47 @@ class MAPPOAgent:
             "actor_opt": self.actor_opt.state_dict(),
             "critic_opt": self.critic_opt.state_dict(),
             "policy_variant": self.policy_variant,
+            "obs_dim": getattr(self, "obs_dim", OBS_DIM),
+            "nav_dim": getattr(self.actor, "nav_dim", NAV_DIM),
+            "offload_dim": getattr(self.actor, "offload_dim", OFFLOAD_DIM),
         }, path)
 
     def load_checkpoint(self, path: str):
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"Checkpoint file not found: {path}")
+
         ckpt = torch.load(path, map_location=self.device)
-        self.actor.load_state_dict(ckpt["actor"])
+        actor_state = dict(ckpt["actor"])
+
+        # Guard against incompatible obsolete single-stream checkpoints
+        if "backbone.0.weight" in actor_state and "nav_backbone.0.weight" not in actor_state:
+            raise RuntimeError(
+                f"Incompatible historical checkpoint architecture in {path}. "
+                "This checkpoint was saved with an obsolete single-stream network ('backbone.*') "
+                "prior to the Two-Stream Decoupled Architecture refactoring. "
+                "Direct loading is unsupported; please use retrained Two-Stream checkpoints."
+            )
+
+        # Backward compatibility adaptation: 16-dim nav input into canonical 18-dim nav input
+        if "nav_backbone.0.weight" in actor_state:
+            w_ckpt = actor_state["nav_backbone.0.weight"]
+            w_curr = self.actor.nav_backbone[0].weight
+            if w_ckpt.shape != w_curr.shape:
+                if w_ckpt.shape[0] == w_curr.shape[0] and w_ckpt.shape[1] == 16 and w_curr.shape[1] == 18:
+                    adapted_w = torch.zeros_like(w_curr)
+                    adapted_w[:, :16] = w_ckpt
+                    adapted_w[:, 16:] = 0.0
+                    actor_state["nav_backbone.0.weight"] = adapted_w
+                elif w_ckpt.shape[0] == w_curr.shape[0] and w_ckpt.shape[1] == 18 and w_curr.shape[1] == 16:
+                    actor_state["nav_backbone.0.weight"] = w_ckpt[:, :16]
+
+        self.actor.load_state_dict(actor_state)
         self.critic.load_state_dict(ckpt["critic"])
         if "actor_opt" in ckpt:
-            self.actor_opt.load_state_dict(ckpt["actor_opt"])
+            try:
+                self.actor_opt.load_state_dict(ckpt["actor_opt"])
+            except Exception:
+                pass  # Optimizer restart on dimension adaptation
         if "critic_opt" in ckpt:
             self.critic_opt.load_state_dict(ckpt["critic_opt"])
         if "policy_variant" in ckpt:
