@@ -30,8 +30,12 @@ PUB_CSV_PATH = os.path.join(BASE_DIR, "results", "publication_figures", "joint_c
 def ensure_raw_trajectory_data():
     """Ensures metropolis_trajectory_records.csv exists before running tests."""
     if not os.path.exists(TRAJ_PATH):
-        from scratch.record_metropolis_trajectories import record_metropolis_trajectories
-        record_metropolis_trajectories(seed=101)
+        try:
+            from utils.trajectory_recorder import record_metropolis_trajectories
+            record_metropolis_trajectories(seed=101)
+        except Exception:
+            from scratch.record_metropolis_trajectories import record_metropolis_trajectories
+            record_metropolis_trajectories(seed=101)
     assert os.path.exists(TRAJ_PATH), f"Raw trajectory records missing at {TRAJ_PATH}"
 
 def test_export_algorithm_metrics_dynamically_derived(ensure_raw_trajectory_data):
