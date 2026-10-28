@@ -3,7 +3,7 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.14-blue.svg)](https://www.python.org/)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.0%2B%20%7C%20CUDA%20Ready-ee4c2c.svg)](https://pytorch.org/)
 [![Gymnasium](https://img.shields.io/badge/Gymnasium-0.29%2B-darkgreen.svg)](https://gymnasium.farama.org/)
-[![Tests](https://img.shields.io/badge/Tests-12%2F12%20Passing-brightgreen.svg)](tests/test_framework.py)
+[![Tests](https://img.shields.io/badge/Tests-67%2F67%20Passing-brightgreen.svg)](tests/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![WebGL Simulator](https://img.shields.io/badge/Simulator-Three.js%203D-purple.svg)](http://127.0.0.1:5000)
 
@@ -15,12 +15,12 @@ A comprehensive, publication-grade research framework evaluating **Joint Multi-A
 
 ```mermaid
 flowchart TD
-    A[Environment Setup: CPU / CUDA GPU] --> B[1. Verification Suite: pytest tests/]
+    A[Environment Setup: CPU / CUDA GPU] --> B[1. Verification Suite: pytest tests/ (67 Tests)]
     B --> C[2. Training Pipeline: train.py]
     C -->|Checkpoint Weights| D[3. Evaluation & Benchmarking: evaluate.py]
     C -->|Checkpoints & Geometries| E[4. Complex Topographies: run_navigation_experiments.py]
-    E --> F[5. Fleet Scalability Suite: scratch/run_scalable_complex_experiments.py]
-    F --> G[6. Publication Figure Generation: plots/generate_publication_figures.py]
+    E --> F[5. Tracked Trajectory Recording: utils/trajectory_recorder.py]
+    F --> G[6. Publication Figure Generation: plots/render_publication_figures.py]
     G --> H[7. Interactive WebGL 3D Simulator: simulator_server.py]
     
     style A fill:#e0f2fe,stroke:#0284c7
@@ -44,8 +44,8 @@ python -m venv .venv
 pip install --upgrade pip
 pip install -r requirements.txt
 
-# 3. Verify all 12 physical contracts and safety tests pass
-python -m pytest tests/test_framework.py
+# 3. Verify all physical contracts, MARL policies, and research integrity regression tests pass (67/67 passing)
+python -m pytest tests/
 ```
 
 ---
@@ -122,11 +122,11 @@ python run_navigation_experiments.py --preset chokepoint --num_uavs 4 --seed 101
 python run_navigation_experiments.py --preset metropolis --num_uavs 4 --seed 101 --device auto
 ```
 
-#### C. Swarm Fleet Scalability Experiments ($N \in \{4, 6, 8, 12\}$ UAVs)
-Evaluates Ground Edge Server queue saturation, peer relaying, and inter-UAV collision deconfliction under increasing fleet density:
-```powershell
-python scratch/run_scalable_complex_experiments.py
-```
+#### C. Fleet Scalability Status ($N = 4$ Supported; $N \in \{6, 8, 12\}$ Unsupported)
+> [!IMPORTANT]
+> The canonical Two-Stream MAPPO neural architecture strictly supports **$N = 4$ UAVs** (3 inter-UAV peer communication channels, 5 discrete task offload actions, 52-dim centralized critic state).
+> Running larger fleets ($N \in \{6, 8, 12\}$) requires permutation-invariant graph/attention neural architectures and is currently unsupported by the trained neural policy. `MultiUAVEnv` and `run_navigation_experiments.py` strictly validate and reject $N \ne 4$.
+> Historical exploratory heuristic queue simulations for $N \in \{6, 8, 12\}$ under simplified models are preserved in `scratch/run_scalable_complex_experiments.py` for reference.
 
 ---
 
@@ -204,9 +204,13 @@ results/
 
 ### A. Environmental Topography Stress Test ($N = 4$ UAVs)
 
+> [!IMPORTANT]
+> **Scientific Integrity & Causal Attribution Notice:**
+> The `hybrid_astar_mappo` baseline with `residual_weight = 0.0` uses global 3D A* graph search and classical 3D Pure Pursuit ($L = 12.0\,\text{m}$) for UAV movement, utilizing MAPPO exclusively for discrete Mobile Edge Computing (MEC) task offloading. Consequently, the observed path length (60.00 m) and flight arrival times (4.0 s) are produced by the classical geometric planner and path tracker, **not** learned neural movement. Learned navigation is evaluated separately via `mappo_residual` (APF + learned residual), `hybrid_astar_mappo_res02` ($w_{\text{res}} = 0.2$), and `mappo_pure`. All evaluation tools distinguish `hybrid_astar_mappo_zero` ($w_{\text{res}} = 0.0$) from non-zero learned residuals.
+
 | Topography | Algorithm | Key | Mean Path (m) | Arrival Time (s) | Swarm Energy (kJ) | Safety Interventions | Success Rate (%) |
 | :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Benchmark**<br>*(4 Cylinders)* | **Hierarchical A\* + MAPPO (Hybrid)** | `hybrid_astar_mappo` | **60.00** | **4.0** | **66.94** | **0** | **100.0%** |
+| **Benchmark**<br>*(4 Cylinders)* | **Hierarchical A\* + MAPPO (Hybrid, $w_{\text{res}}=0.0$)** | `hybrid_astar_mappo` | **60.00** | **4.0** | **66.94** | **0** | **100.0%** |
 | | APF Residual MAPPO | `mappo_residual` | 213.28 | 4.0 | 65.27 | 0 | 100.0% |
 | | 3D A\* Baseline | `astar` | 61.15 | 5.0 | 66.77 | 0 | 100.0% |
 | | 3D SAPF (Adaptive Field) | `sapf` | 87.27 | 6.0 | 66.63 | 0 | 100.0% |
@@ -215,18 +219,22 @@ results/
 | | Independent PPO (IPPO) | `ippo` | 166.20 | 100.0 | 65.07 | 88 | 0.0% |
 | | Centralized PPO (CPPO) | `cppo` | 155.13 | 100.0 | 65.10 | 113 | 0.0% |
 | | Multi-Agent DDPG (MADDPG) | `maddpg` | 442.07 | 100.0 | 60.48 | 198 | 0.0% |
-| **Canyon Chokepoint**<br>*(8 Constrictions)* | **Hierarchical A\* + MAPPO (Hybrid)** | `hybrid_astar_mappo` | **73.31** | **5.0** | **66.80** | **0** | **100.0%** |
+| **Canyon Chokepoint**<br>*(8 Constrictions)* | **Hierarchical A\* + MAPPO (Hybrid, $w_{\text{res}}=0.0$)** | `hybrid_astar_mappo` | **73.31** | **5.0** | **66.80** | **0** | **100.0%** |
 | | 3D A\* Baseline | `astar` | 73.31 | 7.0 | 66.58 | 0 | 100.0% |
 | | 3D SAPF (Adaptive Field) | `sapf` | 45.00 | 3.0 | 67.04 | 0 | 100.0% |
 | | 3D RRT\* (Optimal Tree) | `rrt_star` | 99.76 | 8.5 | 66.25 | 0 | 100.0% |
 | | APF Residual MAPPO | `mappo_residual` | 19.19 | 100.0 | 67.24 | 396 | 0.0% (Wall trap) |
-| **Metropolis City**<br>*(20 Skyscrapers)* | **Hierarchical A\* + MAPPO (Hybrid)** | `hybrid_astar_mappo` | **98.25** | **6.8** | **66.60** | **12** | **100.0%** |
+| **Metropolis City**<br>*(20 Skyscrapers)* | **Hierarchical A\* + MAPPO (Hybrid, $w_{\text{res}}=0.0$)** | `hybrid_astar_mappo` | **98.25** | **6.8** | **66.60** | **12** | **100.0%** |
 | | 3D A\* Baseline | `astar` | 108.17 | 8.5 | 66.36 | 12 | 100.0% |
 | | 3D SAPF (Adaptive Field) | `sapf` | 161.95 | 13.5 | 65.46 | 36 | 100.0% |
 | | 3D RRT\* (Optimal Tree) | `rrt_star` | 12.70 | 100.0 | 67.24 | 412 | 0.0% |
 | | APF Residual MAPPO | `mappo_residual` | 13.05 | 100.0 | 67.27 | 412 | 0.0% (Maze trap) |
 
 ### B. Fleet Scalability Analysis ($N = 4 \to 12$ UAVs)
+
+> [!WARNING]
+> **Architectural Scope & Neural Policy Constraints:**
+> The primary MARL environment (`MultiUAVEnv`) uses fixed observation tensors (52-dimensional centralized state, 3 peer channels, 5 offload actions) that strictly support $N = 4$ UAVs. The table below represents historical queue simulations under synthetic load. Arbitrary swarm sizes ($N \in \{6, 8, 12\}$) cannot be executed through the neural policy checkpoint pipelines without graph neural network (GNN) refactoring, and are explicitly rejected with informative error messages by `MultiUAVEnv`.
 
 | Fleet Size $N$ | Algorithm | Mean Task Delay (s) | Energy per UAV (kJ) | Barrier Interventions | Mission Success (%) |
 | :---: | :--- | :---: | :---: | :---: | :---: |
@@ -243,7 +251,30 @@ results/
 
 ---
 
-## 5. Overview of Generated Publication Figures
+## 5. Research Integrity & Code Audit Remediation
+
+The repository has undergone a comprehensive 14-finding scientific code audit and research-grade refactor. All 14 findings (C-01 to M-14) are verified with regression tests in `tests/test_research_integrity.py`:
+
+| Finding | Severity | Subsystem | Description & Resolution |
+| :--- | :---: | :--- | :--- |
+| **C-01** | Critical | `env/multi_uav_env.py` | Enforced $N=4$ fleet size in MARL environment; documented architectural bounds. |
+| **C-02** | Critical | `models/astar.py`, `evaluate.py` | Disentangled classical Pure Pursuit from RL residual; added explicit causal labeling. |
+| **C-03** | Critical | `simulator/flight_engine.py` | Strict checkpoint validation; fails closed on missing weights unless explicit smoke flag is set. |
+| **H-04** | High | `train.py` | Corrected validation aggregation to compute mean over all validation seeds. |
+| **H-05** | High | `env/comms_compute.py` | Implemented true Poisson task arrivals $k \sim \text{Poisson}(\lambda \cdot \Delta t)$. |
+| **H-06** | High | `env/comms_compute.py` | Unified physical CPU capacity tracking and shared background edge server load. |
+| **H-07** | High | `env/observation_builder.py` | Expanded canonical state to 52 dimensions including 3D relative goal vectors. |
+| **H-08** | High | `train.py`, `models/mappo.py` | Fixed-offload ablation freezes offload heads and stores executed actions in PPO buffer. |
+| **H-09** | High | `env/safety_filter.py` | Implemented exact 3D finite-cylinder clearance considering radius and height. |
+| **H-10** | High | `simulator/flight_engine.py` | Disclosed single-agent illustrative inference mode in 3D simulator metadata. |
+| **M-11** | Medium | `run_navigation_experiments.py`| Replaced hardcoded latency with active CPU/GPU inference microbenchmark. |
+| **M-12** | Medium | `simulator/flight_engine.py` | Unified reach tolerance across all planners ($d_{\text{reach}} = 2.0\,\text{m}$). |
+| **M-13** | Medium | `env/safety_filter.py` | Added robust tuple and dictionary obstacle normalization. |
+| **M-14** | Medium | `utils/trajectory_recorder.py` | Decoupled tests from gitignored scratch scripts; added `ARTIFACT_MANIFEST.md`. |
+
+---
+
+## 6. Overview of Generated Publication Figures
 
 | Figure | Description | High-Res PNG | Vector PDF |
 | :---: | :--- | :---: | :---: |
@@ -255,7 +286,7 @@ results/
 
 ---
 
-## 6. Mathematical Foundations & Physics Modeling
+## 7. Mathematical Foundations & Physics Modeling
 
 ### A. Rotary-Wing Aerodynamics (Zeng et al., 2019)
 The propulsion power consumption $P(v)$ for a rotary-wing UAV flying at horizontal airspeed $v$ follows:
@@ -272,14 +303,14 @@ where $B = 20\,\text{MHz}$, $P_{\text{tx}} = 0.1\,\text{W}$ ($20\,\text{dBm}$), 
 ### C. Multi-Agent Reinforcement Learning Hierarchy
 1. **Hierarchical A\* + MAPPO (Proposed Hybrid)**: High-level 3D A* graph search precomputes collision-free global waypoints; low-level MAPPO neural policy tracks waypoints using 3D Pure Pursuit ($L = 12.0\,\text{m}$) while dynamically avoiding peer UAVs ($d_{\text{safe}} = 8.0\,\text{m}$) and optimizing multi-tier MEC task offloading.
 2. **APF-Assisted Residual MAPPO**: Actor outputs residual correction $\mathbf{u} = 2.0 \cdot \mathbf{u}_{\text{nom}} + 0.4 \cdot \mathbf{u}_{\text{learned}}$, utilizing nominal potential field guidance.
-3. **Pure MAPPO (CTDE)**: Dual-head actor outputs continuous velocity displacement $\Delta \mathbf{p} \in \mathbb{R}^3$ and discrete offload target $a_{\text{off}} \in \{0, \dots, N\}$. Value critic evaluates centralized global state $S \in \mathbb{R}^{10N}$.
+3. **Pure MAPPO (CTDE)**: Dual-head actor outputs continuous velocity displacement $\Delta \mathbf{p} \in \mathbb{R}^3$ and discrete offload target $a_{\text{off}} \in \{0, \dots, N\}$. Value critic evaluates centralized global state $S \in \mathbb{R}^{13N}$ ($52$ dimensions for $N=4$, with explicit 3D relative goal vectors).
 4. **Independent PPO (IPPO, DTDE)**: Fully decentralized actor and local critic $V_j(o_j)$ operating under partial observability.
 5. **Centralized PPO (CPPO, CTCE)**: Single centralized actor and critic outputting joint action vectors $\mathbf{a} \in \mathbb{R}^{3N}$ for the entire fleet simultaneously.
 6. **Multi-Agent DDPG (MADDPG)**: Continuous deterministic actor-critic with Gumbel-Softmax discrete relaxation and centralized continuous Q-critic $Q(S, A)$.
 
 ---
 
-## 7. Citation & Defense References
+## 8. Citation & Defense References
 
 ```bibtex
 @article{zeng2019energy,
