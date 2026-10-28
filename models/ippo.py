@@ -103,6 +103,14 @@ class IPPOAgent:
                 vals.append(float(v.squeeze(0).item()))
             return float(np.mean(vals))
 
+    def freeze_offloading(self, freeze: bool = True):
+        """Freezes offloading stream and actor head to isolate movement learning during fixed-offload ablation."""
+        self.actor.freeze_offload = freeze
+        for p in self.actor.offload_backbone.parameters():
+            p.requires_grad = not freeze
+        for p in self.actor.offload_head.parameters():
+            p.requires_grad = not freeze
+
     def update(
         self,
         buffer: RolloutBuffer,

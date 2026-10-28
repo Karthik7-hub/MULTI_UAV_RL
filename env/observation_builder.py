@@ -54,8 +54,49 @@ NAV_DIM: int = len(NAV_FEATURE_INDICES)  # Exactly 18 dimensions
 OFFLOAD_FEATURE_INDICES: List[int] = list(range(0, 3)) + list(range(10, 17))
 OFFLOAD_DIM: int = len(OFFLOAD_FEATURE_INDICES)  # Exactly 10 dimensions
 
-# Centralized Critic Global State per UAV: pos (3), vel (3), station_dist (1), task (3)
-STATE_DIM_PER_UAV: int = 10
+# Centralized Global State Schema per UAV (Canonical 13 Dimensions):
+# Includes explicit 3D relative goal vectors (dx, dy, dz) to allow centralized policies (e.g., CPPO)
+# to distinguish target directions at identical Euclidean distances:
+# - pos[0:3]          : 3D Position Coordinates (x, y, z) / 200.0 m
+# - vel[3:6]          : 3D Flight Velocity (vx, vy, vz) / 15.0 m/s
+# - rel_station[6:9]  : 3D Relative Vector to Target Station (dx, dy, dz) / 200.0 m
+# - station_dist[9]   : Euclidean Distance to Target Station / 200.0 m
+# - task[10:13]       : Computational Task Attributes (cycles, data, deadline)
+STATE_DIM_PER_UAV: int = 13
+LEGACY_STATE_DIM_PER_UAV: int = 10
+
+
+def build_centralized_state(
+    positions: Dict[int, np.ndarray],
+    velocities: Dict[int, np.ndarray],
+    stations: Dict[int, np.ndarray],
+    current_tasks: Dict[int, Any],
+    num_uavs: int = 4,
+    airspace_bound: float = 200.0,
+    v_max: float = 15.0
+) -> np.ndarray:
+    """
+    Constructs the canonical centralized global state vector across all UAVs.
+    Guarantees that states differing only in goal direction produce distinct vectors.
+    """
+    parts = []
+    for j in range(num_uavs):
+        p_j = np.array(positions[j], dtype=np.float32) / airspace_bound
+        v_j = np.array(velocities[j], dtype=np.float32) / v_max
+        st_j = np.array(stations[j], dtype=np.float32)
+        rel_g = (st_j - np.array(positions[j], dtype=np.float32)) / airspace_bound
+        d_s = np.array([np.linalg.norm(positions[j] - st_j) / airspace_bound], dtype=np.float32)
+        task = current_tasks.get(j)
+        if task is not None:
+            t_f = np.array([
+                task.cycles / 1.5e9,
+                task.data_size / 3.0e6,
+                task.deadline / 3.0
+            ], dtype=np.float32)
+        else:
+            t_f = np.zeros(3, dtype=np.float32)
+        parts.extend([p_j, v_j, rel_g, d_s, t_f])
+    return np.concatenate(parts).astype(np.float32)
 
 
 def compute_data_rate_to_edge(

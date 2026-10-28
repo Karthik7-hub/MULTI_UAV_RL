@@ -83,6 +83,7 @@ class ActorNetwork(nn.Module):
         nn.init.constant_(self.move_mean_head.bias, 0.0)
         nn.init.orthogonal_(self.offload_head.weight, gain=0.01)
         nn.init.constant_(self.offload_head.bias, 0.0)
+        self.freeze_offload: bool = False
 
     def compute_nominal_apf_guidance(self, obs: torch.Tensor) -> torch.Tensor:
         """Computes verified nominal APF controller vector with 2D cross-product directional steering."""
@@ -163,7 +164,10 @@ class ActorNetwork(nn.Module):
 
         log_prob_offload = dist_offload.log_prob(act_offload)
         log_prob_move = dist_move.log_prob(act_move).sum(dim=-1)
-        total_log_prob = log_prob_offload + log_prob_move
+        if self.freeze_offload:
+            total_log_prob = log_prob_move
+        else:
+            total_log_prob = log_prob_offload + log_prob_move
 
         return act_move, act_offload, total_log_prob
 
@@ -174,9 +178,12 @@ class ActorNetwork(nn.Module):
 
         log_prob_offload = dist_offload.log_prob(act_offload)
         log_prob_move = dist_move.log_prob(act_move).sum(dim=-1)
-        total_log_prob = log_prob_offload + log_prob_move
-
-        entropy = dist_offload.entropy() + dist_move.entropy().sum(dim=-1)
+        if self.freeze_offload:
+            total_log_prob = log_prob_move
+            entropy = dist_move.entropy().sum(dim=-1)
+        else:
+            total_log_prob = log_prob_offload + log_prob_move
+            entropy = dist_offload.entropy() + dist_move.entropy().sum(dim=-1)
         return total_log_prob, entropy
 
 class CriticNetwork(nn.Module):
@@ -351,6 +358,14 @@ class MAPPOAgent:
             v = self.critic(t_s)
             return float(v.squeeze(0).item())
 
+    def freeze_offloading(self, freeze: bool = True):
+        """Freezes offloading stream and actor head to isolate movement learning during fixed-offload ablation."""
+        self.actor.freeze_offload = freeze
+        for p in self.actor.offload_backbone.parameters():
+            p.requires_grad = not freeze
+        for p in self.actor.offload_head.parameters():
+            p.requires_grad = not freeze
+
     def update(
         self,
         buffer: RolloutBuffer,
@@ -508,7 +523,33 @@ class MAPPOAgent:
                     actor_state["nav_backbone.0.weight"] = w_ckpt[:, :16]
 
         self.actor.load_state_dict(actor_state)
-        self.critic.load_state_dict(ckpt["critic"])
+
+        critic_state = dict(ckpt["critic"])
+        if "net.0.weight" in critic_state:
+            w_c_ckpt = critic_state["net.0.weight"]
+            w_c_curr = self.critic.net[0].weight
+            if w_c_ckpt.shape != w_c_curr.shape:
+                if w_c_ckpt.shape[0] == w_c_curr.shape[0] and w_c_ckpt.shape[1] == 40 and w_c_curr.shape[1] == 52:
+                    adapted_cw = torch.zeros_like(w_c_curr)
+                    for uav_idx in range(self.num_uavs):
+                        src = uav_idx * 10
+                        dst = uav_idx * 13
+                        adapted_cw[:, dst:dst+6] = w_c_ckpt[:, src:src+6]
+                        # rel_goal columns [dst+6:dst+9] are zero-initialized
+                        adapted_cw[:, dst+9] = w_c_ckpt[:, src+6]
+                        adapted_cw[:, dst+10:dst+13] = w_c_ckpt[:, src+7:src+10]
+                    critic_state["net.0.weight"] = adapted_cw
+                elif w_c_ckpt.shape[0] == w_c_curr.shape[0] and w_c_ckpt.shape[1] == 52 and w_c_curr.shape[1] == 40:
+                    adapted_cw = torch.zeros_like(w_c_curr)
+                    for uav_idx in range(self.num_uavs):
+                        src = uav_idx * 13
+                        dst = uav_idx * 10
+                        adapted_cw[:, dst:dst+6] = w_c_ckpt[:, src:src+6]
+                        adapted_cw[:, dst+6] = w_c_ckpt[:, src+9]
+                        adapted_cw[:, dst+7:dst+10] = w_c_ckpt[:, src+10:src+13]
+                    critic_state["net.0.weight"] = adapted_cw
+
+        self.critic.load_state_dict(critic_state)
         if "actor_opt" in ckpt:
             try:
                 self.actor_opt.load_state_dict(ckpt["actor_opt"])

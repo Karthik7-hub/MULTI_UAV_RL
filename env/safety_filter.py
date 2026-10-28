@@ -7,7 +7,7 @@ Provides formal guarantees against:
 """
 
 import numpy as np
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Any
 
 class SafetyFilter:
     """
@@ -355,43 +355,99 @@ class SafetyFilter:
     ) -> Tuple[Dict[int, np.ndarray], int, Dict[str, int]]:
         filtered, interventions = self.filter_trajectories(proposed_positions, current_positions, enable_filter=enable_filter)
         return filtered, interventions, self.last_stats
-
-def compute_min_clearance(pos: np.ndarray, obstacles: list, margin: float = 2.0) -> float:
-    """Computes continuous surface clearance to all cylindrical and spherical obstacles."""
-    clearances = []
-    for obs in obstacles:
-        is_sphere = obs.get("type") == "sphere" if isinstance(obs, dict) else len(obs) == 5
-        if is_sphere:
-            cx, cy, cz, r = obs["cx"], obs["cy"], obs["cz"], obs["radius"] if isinstance(obs, dict) else (obs[0], obs[1], obs[2], obs[3])
-            d_3d = float(np.linalg.norm(pos - np.array([cx, cy, cz])))
-            clearances.append(d_3d - (r + margin))
-        else:
-            if isinstance(obs, dict):
-                cx, cy, r, h = float(obs["cx"]), float(obs["cy"]), float(obs["radius"]), float(obs["height"])
-                z_min_obs = float(obs.get("z_min", 0.0))
-                z_max_obs = float(obs.get("z_max", h))
-            else:
-                cx, cy, r, h = float(obs[0]), float(obs[1]), float(obs[2]), float(obs[3])
-                z_min_obs = 0.0
-                z_max_obs = h
-
-            d_xy = float(np.linalg.norm(pos[:2] - np.array([cx, cy])))
-            delta_xy = max(0.0, d_xy - r)
-            if pos[2] > z_max_obs:
-                delta_z = pos[2] - z_max_obs
-            elif pos[2] < z_min_obs:
-                delta_z = z_min_obs - pos[2]
-            else:
-                delta_z = 0.0
-
-            if delta_xy > 0.0 and delta_z > 0.0:
-                d_surface = np.sqrt(delta_xy**2 + delta_z**2)
-            elif delta_xy > 0.0:
-                d_surface = delta_xy
-            elif delta_z > 0.0:
-                d_surface = delta_z
-            else:
-                d_surface = -min(r - d_xy, pos[2] - z_min_obs, z_max_obs - pos[2])
-
-            clearances.append(float(d_surface - margin))
-    return float(min(clearances)) if clearances else 50.0
+
+def parse_obstacle(obs: Any) -> Dict[str, Any]:
+    """
+    Parses dictionary, 4-tuple, or 5-tuple obstacle representations into a canonical normalized structure.
+    - Cylinder: dict(type="cylinder", cx=..., cy=..., radius=..., height=..., z_min=..., z_max=...)
+    - Sphere: dict(type="sphere", cx=..., cy=..., cz=..., radius=...)
+    """
+    if isinstance(obs, dict):
+        obs_type = obs.get("type", "cylinder")
+        if obs_type == "sphere":
+            return {
+                "type": "sphere",
+                "cx": float(obs["cx"]),
+                "cy": float(obs["cy"]),
+                "cz": float(obs["cz"]),
+                "radius": float(obs["radius"])
+            }
+        else:
+            h = float(obs["height"])
+            return {
+                "type": "cylinder",
+                "cx": float(obs["cx"]),
+                "cy": float(obs["cy"]),
+                "radius": float(obs["radius"]),
+                "height": h,
+                "z_min": float(obs.get("z_min", 0.0)),
+                "z_max": float(obs.get("z_max", h))
+            }
+    elif isinstance(obs, (tuple, list)):
+        if len(obs) == 4:
+            cx, cy, r, h = obs
+            return {
+                "type": "cylinder",
+                "cx": float(cx),
+                "cy": float(cy),
+                "radius": float(r),
+                "height": float(h),
+                "z_min": 0.0,
+                "z_max": float(h)
+            }
+        elif len(obs) == 5:
+            if isinstance(obs[0], str) and obs[0] == "sphere":
+                cx, cy, cz, r = obs[1:5]
+            else:
+                cx, cy, cz, r = obs[:4]
+            return {
+                "type": "sphere",
+                "cx": float(cx),
+                "cy": float(cy),
+                "cz": float(cz),
+                "radius": float(r)
+            }
+        else:
+            raise ValueError(f"Malformed obstacle tuple with length {len(obs)}: {obs}. Expected length 4 (cylinder) or 5 (sphere).")
+    else:
+        raise TypeError(f"Unsupported obstacle type: {type(obs)}. Expected dict, tuple, or list.")
+
+def compute_min_clearance(pos: np.ndarray, obstacles: list, margin: float = 2.0) -> float:
+    """
+    Computes exact continuous 3D surface clearance to all cylindrical and spherical obstacles.
+    Clearance = d_surface - margin.
+    """
+    clearances = []
+    p = np.array(pos, dtype=np.float32)
+    for raw_obs in obstacles:
+        parsed = parse_obstacle(raw_obs)
+        if parsed["type"] == "sphere":
+            cx, cy, cz, r = parsed["cx"], parsed["cy"], parsed["cz"], parsed["radius"]
+            d_3d = float(np.linalg.norm(p - np.array([cx, cy, cz])))
+            clearances.append(d_3d - (r + margin))
+        else:
+            cx, cy, r, h = parsed["cx"], parsed["cy"], parsed["radius"], parsed["height"]
+            z_min_obs = parsed["z_min"]
+            z_max_obs = parsed["z_max"]
+
+            d_xy = float(np.linalg.norm(p[:2] - np.array([cx, cy])))
+            delta_xy = max(0.0, d_xy - r)
+            if p[2] > z_max_obs:
+                delta_z = p[2] - z_max_obs
+            elif p[2] < z_min_obs:
+                delta_z = z_min_obs - p[2]
+            else:
+                delta_z = 0.0
+
+            if delta_xy > 0.0 and delta_z > 0.0:
+                d_surface = float(np.sqrt(delta_xy**2 + delta_z**2))
+            elif delta_xy > 0.0:
+                d_surface = delta_xy
+            elif delta_z > 0.0:
+                d_surface = delta_z
+            else:
+                # Penetration into obstacle
+                d_surface = -float(min(r - d_xy, p[2] - z_min_obs, z_max_obs - p[2]))
+
+            clearances.append(float(d_surface - margin))
+    return float(min(clearances)) if clearances else 50.0

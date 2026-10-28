@@ -15,6 +15,7 @@ from env.safety_filter import SafetyFilter
 from env.observation_builder import (
     build_single_uav_obs,
     compute_obstacle_clearance_tangent,
+    build_centralized_state,
     OBS_DIM,
     STATE_DIM_PER_UAV
 )
@@ -29,7 +30,9 @@ class MultiUAVEnv(gym.Env):
         if self.num_uavs != 4:
             raise ValueError(
                 f"MultiUAVEnv canonical Two-Stream architecture strictly enforces fleet size N=4 "
-                f"(3 peer distances, 5 offload actions, 40-dim critic state). Got num_uavs={self.num_uavs}."
+                f"(3 peer distances, 5 offload actions, {4 * STATE_DIM_PER_UAV}-dim critic state with explicit 3D relative goal vectors). "
+                f"Larger fleet sizes N in {{6, 8, 12}} are currently unsupported by the trained neural policy and critic architecture. "
+                f"Got num_uavs={self.num_uavs}."
             )
         self.episode_length = self.cfg.mappo.episode_length
         self.current_step = 0
@@ -233,7 +236,10 @@ class MultiUAVEnv(gym.Env):
                     ], dtype=np.float32)
                 self.velocities[j] = np.zeros(3, dtype=np.float32)
 
-        self.current_tasks = {j: self.task_gen.sample_task(j, self.current_step, self.rng) for j in range(self.num_uavs)}
+        self.current_tasks = {
+            j: self.task_gen.sample_task(j, self.current_step, self.rng, delta_t=self.cfg.physics.delta_t)
+            for j in range(self.num_uavs)
+        }
         self._prev_d_stations = {j: float(np.linalg.norm(self.positions[j] - self.stations[j])) for j in range(self.num_uavs)}
 
         # Phase 2: Disentangled Mission Protocol & Energy Tracking
@@ -537,7 +543,10 @@ class MultiUAVEnv(gym.Env):
         self._prev_d_stations = {j: float(np.linalg.norm(self.positions[j] - self.stations[j])) for j in range(self.num_uavs)}
 
         # Generate new stochastic Poisson tasks for the next step
-        self.current_tasks = {j: self.task_gen.sample_task(j, self.current_step, self.rng) for j in range(self.num_uavs)}
+        self.current_tasks = {
+            j: self.task_gen.sample_task(j, self.current_step, self.rng, delta_t=self.cfg.physics.delta_t)
+            for j in range(self.num_uavs)
+        }
 
         # Mission Termination Logic: Explicitly differentiate arrival, collision, and truncation
         all_arrived = all(self.arrival_steps[j] is not None for j in range(self.num_uavs))
@@ -631,27 +640,25 @@ class MultiUAVEnv(gym.Env):
         # =========================================================================
         # PURPOSE:
         # Constructs the centralized global state vector s for the Centralized Critic
-        # in MAPPO, MADDPG, and CPPO (CTDE paradigm).
+        # in MAPPO, MADDPG, and CPPO (CTDE/CTCE paradigm).
         #
         # Concatenates true global state information across all N UAVs:
         # Per UAV:
         # - Position: 3 floats (normalized / 200.0)
         # - Velocity: 3 floats (normalized / 15.0)
+        # - Relative Vector to Station: 3 floats (dx, dy, dz) / 200.0
         # - Station Distance: 1 float (normalized / 200.0)
         # - Task Attributes: 3 floats (cycles, data_size, deadline)
-        # Total per UAV = 10 floats.
-        # Global State Dimension for N=4 UAVs = 4 * 10 = 40 floats.
+        # Total per UAV = 13 floats.
+        # Global State Dimension for N=4 UAVs = 4 * 13 = 52 floats.
         # =========================================================================
         """
-        parts = []
-        for j in range(self.num_uavs):
-            p_j = self.positions[j] / 200.0
-            v_j = self.velocities[j] / self.cfg.physics.v_max
-            d_s = np.array([np.linalg.norm(self.positions[j] - self.stations[j]) / 200.0])
-            task = self.current_tasks[j]
-            if task is not None:
-                t_f = np.array([task.cycles / 1.5e9, task.data_size / 3e6, task.deadline / 3.0])
-            else:
-                t_f = np.zeros(3)
-            parts.extend([p_j, v_j, d_s, t_f])
-        return np.concatenate(parts).astype(np.float32)
+        return build_centralized_state(
+            positions=self.positions,
+            velocities=self.velocities,
+            stations=self.stations,
+            current_tasks=self.current_tasks,
+            num_uavs=self.num_uavs,
+            airspace_bound=200.0,
+            v_max=self.cfg.physics.v_max
+        )

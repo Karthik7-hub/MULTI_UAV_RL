@@ -17,24 +17,33 @@ from typing import Dict, Tuple
 from utils.device import DeviceManager
 
 class CentralizedActorNetwork(nn.Module):
-    def __init__(self, state_dim: int, num_uavs: int = 4, num_offload_actions: int = 5, hidden_dim: int = 128, max_disp: float = 15.0):
+    def __init__(self, state_dim: int = 52, num_uavs: int = 4, num_offload_actions: int = 5, hidden_dim: int = 128, max_disp: float = 15.0):
         super().__init__()
+        self.state_dim = state_dim
         self.num_uavs = num_uavs
         self.num_offload_actions = num_offload_actions
         self.max_disp = max_disp
 
         # Two-Stream Decoupled Architecture for Centralized Actor:
-        # State: 40 dims (10 per UAV: pos(3), vel(3), dist(1), task(3))
-        # Nav features: pos, vel, dist for all 4 UAVs (7 * 4 = 28 dims)
-        # Offload features: pos, task, dist for all 4 UAVs (7 * 4 = 28 dims)
+        # Canonical State: 52 dims (13 per UAV: pos(3), vel(3), rel_station(3), dist(1), task(3))
+        # Nav features: pos, vel, rel_station, dist for all 4 UAVs (10 * 4 = 40 dims)
+        # Offload features: pos, dist, task for all 4 UAVs (7 * 4 = 28 dims)
         self.nav_indices = []
         self.offload_indices = []
-        for j in range(num_uavs):
-            self.nav_indices.extend([j * 10 + k for k in range(7)])
-            self.offload_indices.extend([j * 10 + 0, j * 10 + 1, j * 10 + 2, j * 10 + 6, j * 10 + 7, j * 10 + 8, j * 10 + 9])
+        if state_dim == 52 and num_uavs == 4:
+            for j in range(num_uavs):
+                self.nav_indices.extend([j * 13 + k for k in range(10)])
+                self.offload_indices.extend([j * 13 + 0, j * 13 + 1, j * 13 + 2, j * 13 + 9, j * 13 + 10, j * 13 + 11, j * 13 + 12])
+        elif state_dim == 40 and num_uavs == 4:
+            for j in range(num_uavs):
+                self.nav_indices.extend([j * 10 + k for k in range(7)])
+                self.offload_indices.extend([j * 10 + 0, j * 10 + 1, j * 10 + 2, j * 10 + 6, j * 10 + 7, j * 10 + 8, j * 10 + 9])
+        else:
+            self.nav_indices = list(range(state_dim))
+            self.offload_indices = list(range(state_dim))
         
-        self.nav_dim = len(self.nav_indices) if state_dim == 40 else state_dim
-        self.offload_dim = len(self.offload_indices) if state_dim == 40 else state_dim
+        self.nav_dim = len(self.nav_indices)
+        self.offload_dim = len(self.offload_indices)
 
         self.nav_backbone = nn.Sequential(
             nn.Linear(self.nav_dim, hidden_dim * 2),
@@ -60,7 +69,7 @@ class CentralizedActorNetwork(nn.Module):
         ])
 
     def forward(self, state: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        if state.shape[-1] == 40:
+        if state.shape[-1] == self.state_dim:
             nav_feat = state[..., self.nav_indices]
             offload_feat = state[..., self.offload_indices]
         else:
@@ -271,8 +280,26 @@ class CPPOAgent:
         }, path)
 
     def load_checkpoint(self, path: str):
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"CPPO checkpoint file not found: {path}")
         ckpt = torch.load(path, map_location=self.device)
-        self.actor.load_state_dict(ckpt["actor"])
+        actor_state = ckpt["actor"]
+        if "nav_backbone.0.weight" in actor_state:
+            ckpt_nav_in = actor_state["nav_backbone.0.weight"].shape[1]
+            curr_nav_in = self.actor.nav_backbone[0].weight.shape[1]
+            if ckpt_nav_in != curr_nav_in:
+                raise RuntimeError(
+                    f"Incompatible CPPO checkpoint: {path} was trained with obsolete state representation "
+                    f"(nav_in={ckpt_nav_in}, derived from obsolete 40-dim state without 3D goal direction). "
+                    f"The corrected CPPO architecture requires canonical nav_in={curr_nav_in} (from 52-dim state with 3D goal direction). "
+                    f"To preserve research reproducibility, this checkpoint cannot be used for inference. Please retrain CPPO."
+                )
+        elif "backbone.0.weight" in actor_state:
+            raise RuntimeError(
+                f"Incompatible historical CPPO checkpoint: {path} was saved with an obsolete single-stream backbone. "
+                f"Direct loading is unsupported; please retrain with canonical 52-dim state."
+            )
+        self.actor.load_state_dict(actor_state)
         self.critic.load_state_dict(ckpt["critic"])
         if "actor_opt" in ckpt:
             self.actor_opt.load_state_dict(ckpt["actor_opt"])

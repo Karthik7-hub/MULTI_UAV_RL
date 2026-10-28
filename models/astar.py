@@ -1022,24 +1022,18 @@ class HybridAStarMAPPONavigator:
 
 
         return {
-
             "status": status,
-
             "planner": "hybrid_astar_mappo",
-
             "path": path_coords,
-
             "explored_nodes": explored_nodes,
-
             "total_path_length": round(total_len, 2),
-
             "planning_time_ms": round(t_plan, 2),
-
             "min_clearance": round(min_overall_clearance, 2),
-
             "steps_count": len(path_coords) - 1,
-
             "steps_telemetry": steps_telemetry
-
         }
+
+# Explicit causal attribution alias: when residual_weight=0.0, motion is 100% A* + Pure Pursuit
+AStarPurePursuitWithMAPPOOffload = HybridAStarMAPPONavigator
+
 

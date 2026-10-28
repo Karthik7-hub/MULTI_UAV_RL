@@ -122,6 +122,7 @@ class ComputationManager:
         self.edge_background_load = edge_background_load
 
         # Persistent task queues (accumulated cycles waiting for execution)
+        # Unified physical processor queues per UAV and shared edge server queue
         self.local_queues: Dict[int, float] = {}
         self.peer_queues: Dict[int, float] = {}
         self.edge_queue: float = 0.0
@@ -133,25 +134,45 @@ class ComputationManager:
         self.edge_queue = 0.0
 
     def step_queues(self, delta_t: float = 1.0):
-        """Advances physical time and drains serviced cycles across all processors."""
-        for j in list(self.local_queues.keys()):
-            self.local_queues[j] = max(0.0, self.local_queues[j] - self.f_local * delta_t)
-        for j in list(self.peer_queues.keys()):
-            self.peer_queues[j] = max(0.0, self.peer_queues[j] - self.f_peer * delta_t)
-        self.edge_queue = max(0.0, self.edge_queue - self.f_edge * delta_t)
+        """
+        Advances physical time and drains serviced cycles across all processors.
+        Ensures each UAV processor does not drain more than physical CPU capacity (f_local * delta_t)
+        across both local and offloaded peer workloads.
+        """
+        all_uav_ids = set(self.local_queues.keys()).union(set(self.peer_queues.keys()))
+        for j in all_uav_ids:
+            q_loc = self.local_queues.get(j, 0.0)
+            q_peer = self.peer_queues.get(j, 0.0)
+            total_q = q_loc + q_peer
+            max_drain = self.f_local * delta_t
+            if total_q <= max_drain:
+                self.local_queues[j] = 0.0
+                self.peer_queues[j] = 0.0
+            else:
+                # Drain FIFO / proportionally across queues sharing the physical CPU
+                ratio_loc = q_loc / total_q if total_q > 0 else 0.5
+                drain_loc = min(q_loc, max_drain * ratio_loc)
+                drain_peer = min(q_peer, max_drain - drain_loc)
+                self.local_queues[j] = max(0.0, q_loc - drain_loc)
+                self.peer_queues[j] = max(0.0, q_peer - drain_peer)
+
+        # Edge queue drains at rate reflecting effective background load
+        eff_drain_rate = self.f_edge / max(1.0, 1.0 + float(self.edge_background_load))
+        self.edge_queue = max(0.0, self.edge_queue - eff_drain_rate * delta_t)
 
     def compute_local(self, task: Task, concurrent_tasks: int = 1) -> Dict[str, float]:
         """Evaluates local on-board UAV CPU task execution (Zero wireless transmission)."""
         uav_id = task.uav_id
-        q_cycles = self.local_queues.get(uav_id, 0.0)
+        # Physical UAV queue includes both existing local tasks and peer tasks assigned to this CPU
+        q_cycles = self.local_queues.get(uav_id, 0.0) + self.peer_queues.get(uav_id, 0.0)
         eff_freq = self.f_local / max(1, concurrent_tasks)
         t_wait = q_cycles / eff_freq
         t_comp = task.cycles / eff_freq
         e_comp = self.kappa * (eff_freq ** 2) * task.cycles
         total_delay = t_wait + t_comp
 
-        # Enqueue new cycles
-        self.local_queues[uav_id] = q_cycles + task.cycles
+        # Enqueue new cycles onto local queue of this UAV
+        self.local_queues[uav_id] = self.local_queues.get(uav_id, 0.0) + task.cycles
         return {"t_tx": 0.0, "t_wait": t_wait, "t_comp": t_comp, "total_delay": total_delay, "energy": e_comp}
 
     def compute_peer(
@@ -166,22 +187,21 @@ class ComputationManager:
         """Evaluates cooperative peer-to-peer offloading to an adjacent UAV.
 
         ``peer_queues`` are keyed by the receiving UAV because they represent
-        work waiting for that UAV's processor.  ``peer_id`` is optional for
-        backwards compatibility with direct callers that do not identify a
-        receiver explicitly.
+        work waiting for that UAV's processor.
         """
         r = comm.data_rate(distance, num_concurrent=num_concurrent_tx)
         t_tx = task.data_size / max(1e3, r)
         e_tx = comm.tx_power * t_tx
         eff_f = self.f_peer / (2.0 if peer_busy else 1.0)
         queue_owner = task.uav_id if peer_id is None else int(peer_id)
-        q_cycles = self.peer_queues.get(queue_owner, 0.0)
+        # Waiting time on receiving UAV accounts for total processor load (local + peer)
+        q_cycles = self.local_queues.get(queue_owner, 0.0) + self.peer_queues.get(queue_owner, 0.0)
         t_wait = q_cycles / eff_f
         t_comp = task.cycles / eff_f
         e_comp = self.kappa * (eff_f ** 2) * task.cycles
         total_delay = t_tx + t_wait + t_comp
 
-        self.peer_queues[queue_owner] = q_cycles + task.cycles
+        self.peer_queues[queue_owner] = self.peer_queues.get(queue_owner, 0.0) + task.cycles
         return {"t_tx": t_tx, "t_wait": t_wait, "t_comp": t_comp, "total_delay": total_delay, "energy": e_tx, "peer_energy": e_comp}
 
     def compute_edge(
@@ -206,23 +226,66 @@ class ComputationManager:
         return {"t_tx": t_tx, "t_wait": t_wait, "t_comp": t_comp, "total_delay": total_delay, "energy": e_tx}
 
 class TaskGenerator:
-    def __init__(self, poisson_lambda: float = 0.8, cycles_range=(0.5e9, 1.5e9), data_range=(0.5e6, 3.0e6), deadline_range=(1.0, 3.0)):
+    """
+    Stochastic MEC Computational Task Generator.
+    Supports mathematically validated Poisson arrival process where lambda is in tasks/second,
+    as well as explicitly documented Bernoulli trial mode.
+    """
+    def __init__(
+        self,
+        poisson_lambda: float = 0.8,
+        cycles_range=(0.5e9, 1.5e9),
+        data_range=(0.5e6, 3.0e6),
+        deadline_range=(1.0, 3.0),
+        arrival_model: str = "poisson"
+    ):
         self.poisson_lambda = poisson_lambda
         self.cycles_range = cycles_range
         self.data_range = data_range
         self.deadline_range = deadline_range
+        self.arrival_model = arrival_model
 
-    def sample_task(self, uav_id: int, current_step: float, rng: np.random.RandomState) -> Optional[Task]:
-        """Stochastically samples an arriving MEC task according to Poisson distribution."""
-        if rng.rand() < self.poisson_lambda:
-            return Task(
-                uav_id=uav_id,
-                cycles=float(rng.uniform(*self.cycles_range)),
-                data_size=float(rng.uniform(*self.data_range)),
-                deadline=float(rng.uniform(*self.deadline_range)),
-                arrival_time=current_step
-            )
-        return None
+    def sample_task_count(self, rng: np.random.RandomState, delta_t: float = 1.0) -> int:
+        """Samples exact task arrival count in time interval delta_t according to arrival model."""
+        if self.arrival_model == "poisson":
+            expected = max(0.0, float(self.poisson_lambda * delta_t))
+            return int(rng.poisson(lam=expected))
+        elif self.arrival_model == "bernoulli":
+            p = float(np.clip(self.poisson_lambda * delta_t, 0.0, 1.0))
+            return 1 if rng.rand() < p else 0
+        else:
+            raise ValueError(f"Unknown arrival_model: {self.arrival_model}")
+
+    def sample_task(
+        self,
+        uav_id: int,
+        current_step: float,
+        rng: np.random.RandomState,
+        delta_t: float = 1.0
+    ) -> Optional[Task]:
+        """
+        Stochastically samples an arriving MEC task according to Poisson or Bernoulli distribution.
+        
+        Args:
+            uav_id: ID of generating UAV.
+            current_step: Simulation time in seconds.
+            rng: Seeded numpy RandomState.
+            delta_t: Time step duration in seconds (default 1.0s).
+        """
+        count = self.sample_task_count(rng, delta_t=delta_t)
+        if count <= 0:
+            return None
+
+        # When >=1 tasks arrive in interval delta_t, sample task attributes
+        # Multiplier aggregates total cycle workload if multiple tasks arrived in the step
+        mult = float(count)
+        return Task(
+            uav_id=uav_id,
+            cycles=float(rng.uniform(*self.cycles_range) * mult),
+            data_size=float(rng.uniform(*self.data_range) * mult),
+            deadline=float(rng.uniform(*self.deadline_range)),
+            arrival_time=current_step
+        )
 
 def run_deterministic_offloading_diagnostics() -> Dict[str, Any]:
     """
