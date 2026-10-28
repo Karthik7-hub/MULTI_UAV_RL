@@ -659,11 +659,16 @@ def plot_publication_3d_trajectory_benchmark(
     """
     fig = plt.figure(figsize=(15, 6.5), dpi=300)
     palette = {
-        "hybrid_astar_mappo": {"name": "Proposed Joint MAPPO", "color": "#1D4ED8", "ls": "-", "lw": 2.2},
+        "hybrid_astar_mappo": {"name": "Hybrid A*+MAPPO (w=0)", "color": "#1D4ED8", "ls": "-", "lw": 2.2},
+        "hybrid_astar_mappo_zero": {"name": "Hybrid A*+MAPPO (w=0)", "color": "#1D4ED8", "ls": "-", "lw": 2.2},
+        "hybrid_astar_mappo_res02": {"name": "Hybrid A*+MAPPO (w=0.2)", "color": "#2563EB", "ls": "-", "lw": 2.0},
+        "astar_pure_pursuit": {"name": "3D A* + Pure Pursuit", "color": "#475569", "ls": "--", "lw": 1.6},
         "astar": {"name": "3D A*", "color": "#DC2626", "ls": "--", "lw": 1.6},
         "sapf": {"name": "3D SAPF", "color": "#7C3AED", "ls": "-.", "lw": 1.6},
         "rrt_star": {"name": "3D RRT*", "color": "#D97706", "ls": ":", "lw": 1.6},
         "mappo_pure": {"name": "Pure MAPPO", "color": "#64748B", "ls": (0, (3, 3)), "lw": 1.4},
+        "mappo_residual": {"name": "Residual MAPPO", "color": "#8B5CF6", "ls": "-", "lw": 1.6},
+        "apf_only": {"name": "APF Only", "color": "#94A3B8", "ls": ":", "lw": 1.4},
         "ippo": {"name": "IPPO", "color": "#059669", "ls": "-", "lw": 1.4},
         "maddpg": {"name": "MADDPG", "color": "#EC4899", "ls": ":", "lw": 1.4},
         "cppo": {"name": "CPPO", "color": "#0EA5E9", "ls": "-.", "lw": 1.4}
