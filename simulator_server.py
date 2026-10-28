@@ -90,7 +90,7 @@ def plan_path():
     target = np.array(data.get("target", [180.0, 180.0, 10.0]), dtype=np.float32)
     raw_obs = data.get("obstacles", [])
     margin = float(data.get("margin", 2.0))
-    seed = data.get("seed", None)
+    allow_untrained = bool(data.get("allow_untrained", False))
 
     try:
         result = engine.simulate_flight(
@@ -99,13 +99,28 @@ def plan_path():
             target=target,
             obstacles=raw_obs,
             margin=margin,
-            seed=seed
+            seed=seed,
+            allow_untrained=allow_untrained
         )
         return jsonify(result)
     except ValueError as e:
         return jsonify({"status": "ERROR", "error": str(e)}), 400
     except Exception as e:
         return jsonify({"status": "ERROR", "error": f"Simulation failure: {e}"}), 500
+
+@app.route("/api/model_status", methods=["GET"])
+def model_status():
+    """Returns status and integrity diagnostics for all registered RL models."""
+    return jsonify({
+        "status": "OK",
+        "agent_status": engine.agent_status,
+        "mode": "single_uav_illustrative_inference",
+        "scope_disclosure": (
+            "Browser flight visualizer demonstrates illustrative single-UAV inference. "
+            "It does not evaluate multi-agent collision avoidance, cooperative critic behavior, "
+            "or joint MEC queue dynamics. For full multi-agent benchmarks, execute evaluate.py."
+        )
+    })
 
 @app.route("/api/compare", methods=["POST"])
 def compare_planners():

@@ -55,6 +55,7 @@ def evaluate_validation(env: MultiUAVEnv, agent: Any, model_type: str, val_seeds
     val_energies = []
     val_interventions = []
     val_arrivals = []
+    val_final_errs = []
 
     for s in val_seeds:
         scen = "nav_general" if s % 2 == 1 else "randomized"
@@ -91,11 +92,13 @@ def evaluate_validation(env: MultiUAVEnv, agent: Any, model_type: str, val_seeds
         val_interventions.append(ep_interv)
         arr_cnt = sum(1 for a in info.get("arrival_steps", {}).values() if a is not None)
         val_arrivals.append((arr_cnt / env.num_uavs) * 100.0)
+        val_final_errs.append(float(info.get("fleet_mean_goal_error", 50.0)))
 
     avg_arrival = float(np.mean(val_arrivals))
     avg_ret = float(np.mean(val_returns))
     avg_interv = float(np.mean(val_interventions))
-    mean_final_err = float(info.get("fleet_mean_goal_error", 50.0))
+    mean_final_err = float(np.mean(val_final_errs)) if val_final_errs else 50.0
+    std_final_err = float(np.std(val_final_errs)) if val_final_errs else 0.0
     # Checkpoint selection metric prioritizes navigation arrival and goal proximity:
     if avg_arrival > 0.0:
         val_score = 1000.0 + avg_arrival * 100.0 - 0.5 * mean_final_err - 2.0 * avg_interv
@@ -110,6 +113,7 @@ def evaluate_validation(env: MultiUAVEnv, agent: Any, model_type: str, val_seeds
         "val_interventions": avg_interv,
         "val_arrival_rate": avg_arrival,
         "val_mean_final_dist": mean_final_err,
+        "val_std_final_dist": std_final_err,
         "val_score": val_score
     }
 
@@ -167,6 +171,8 @@ def train_mappo(
     )
 
     greedy_offloader = EnergyDeadlineAwareGreedyPolicy() if ablation == "fixed_offload" else None
+    if ablation == "fixed_offload":
+        agent.freeze_offloading(True)
 
     base_dir = os.path.dirname(os.path.abspath(__file__))
     res_dir = output_dir or os.path.join(base_dir, "results")
@@ -238,7 +244,9 @@ def train_mappo(
             # Ablation override for fixed heuristic offloading
             if ablation == "fixed_offload":
                 for j in range(env.num_uavs):
-                    actions[j]["offload"] = greedy_offloader.select_offload_action(j, env)
+                    h_act = greedy_offloader.select_offload_action(j, env)
+                    actions[j]["offload"] = h_act
+                    act_offload[j] = h_act
 
             val = agent.get_value(state)
             next_obs, next_state, r, done, info = env.step(actions)

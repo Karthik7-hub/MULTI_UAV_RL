@@ -19,7 +19,7 @@ if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
 from config import MasterConfig
-from env.safety_filter import SafetyFilter
+from env.safety_filter import SafetyFilter, compute_min_clearance, parse_obstacle
 from env.observation_builder import build_single_uav_obs
 from models.astar import AStar3DPlanner, PurePursuit3DController, HybridAStarMAPPONavigator
 from models.rrt_star import RRTStar3DPlanner, RRTStarBaseline
@@ -115,43 +115,7 @@ class FlightEngine:
 
     def compute_min_clearance(self, pos: np.ndarray, obstacles: list, margin: float = 2.0) -> float:
         """Computes continuous surface clearance to all cylindrical and spherical obstacles."""
-        clearances = []
-        for obs in obstacles:
-            is_sphere = obs.get("type") == "sphere" if isinstance(obs, dict) else len(obs) == 5
-            if is_sphere:
-                cx, cy, cz, r = obs["cx"], obs["cy"], obs["cz"], obs["radius"] if isinstance(obs, dict) else (obs[0], obs[1], obs[2], obs[3])
-                d_3d = float(np.linalg.norm(pos - np.array([cx, cy, cz])))
-                clearances.append(d_3d - (r + margin))
-            else:
-                if isinstance(obs, dict):
-                    cx, cy, r, h = float(obs["cx"]), float(obs["cy"]), float(obs["radius"]), float(obs["height"])
-                    z_min_obs = float(obs.get("z_min", 0.0))
-                    z_max_obs = float(obs.get("z_max", h))
-                else:
-                    cx, cy, r, h = float(obs[0]), float(obs[1]), float(obs[2]), float(obs[3])
-                    z_min_obs = 0.0
-                    z_max_obs = h
-
-                d_xy = float(np.linalg.norm(pos[:2] - np.array([cx, cy])))
-                delta_xy = max(0.0, d_xy - r)
-                if pos[2] > z_max_obs:
-                    delta_z = pos[2] - z_max_obs
-                elif pos[2] < z_min_obs:
-                    delta_z = z_min_obs - pos[2]
-                else:
-                    delta_z = 0.0
-
-                if delta_xy > 0.0 and delta_z > 0.0:
-                    d_surface = np.sqrt(delta_xy**2 + delta_z**2)
-                elif delta_xy > 0.0:
-                    d_surface = delta_xy
-                elif delta_z > 0.0:
-                    d_surface = delta_z
-                else:
-                    d_surface = -min(r - d_xy, pos[2] - z_min_obs, z_max_obs - pos[2])
-
-                clearances.append(float(d_surface - margin))
-        return float(min(clearances)) if clearances else 999.0
+        return compute_min_clearance(pos, obstacles, margin=margin)
 
     def make_obs_vector(self, pos: np.ndarray, vel: np.ndarray, target: np.ndarray, raw_obs: list) -> np.ndarray:
         """Constructs verified 20-dim observation vector conforming to MultiUAVEnv contracts."""
@@ -171,16 +135,17 @@ class FlightEngine:
         )
 
     def make_cppo_state(self, pos: np.ndarray, vel: np.ndarray, target: np.ndarray) -> np.ndarray:
-        """Constructs 40-dim global fleet state vector for Centralized PPO with correct normalization."""
+        """Constructs canonical 52-dim global fleet state vector for Centralized PPO with explicit 3D goal direction."""
         d_g = float(np.linalg.norm(pos - target))
         p0_norm = (pos / self.cfg.airspace.x_max).tolist()
         v0_norm = (vel / self.cfg.physics.v_max).tolist()
+        rel_g_norm = ((target - pos) / self.cfg.airspace.x_max).tolist()
         dg_norm = [d_g / self.cfg.airspace.x_max]
         task0_norm = [0.5, 0.5, 0.5]
-        uav0_feat = p0_norm + v0_norm + dg_norm + task0_norm
+        uav0_feat = p0_norm + v0_norm + rel_g_norm + dg_norm + task0_norm
 
-        # Nominal normalized features for peer UAVs 1, 2, 3 conforming to MultiUAVEnv._get_global_state contract
-        dummy_feat = [0.5, 0.5, 0.25, 0.0, 0.0, 0.0, 0.25, 0.5, 0.5, 0.5]
+        # Nominal normalized 13-dim features for peer UAVs 1, 2, 3 conforming to MultiUAVEnv contracts
+        dummy_feat = [0.5, 0.5, 0.25, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.25, 0.5, 0.5, 0.5]
         full = uav0_feat + dummy_feat * (self.cfg.physics.num_uavs - 1)
         return np.array(full, dtype=np.float32)
 
@@ -226,7 +191,8 @@ class FlightEngine:
         target: np.ndarray,
         obstacles: list,
         margin: float = 2.0,
-        seed: Optional[int] = None
+        seed: Optional[int] = None,
+        allow_untrained: bool = False
     ) -> Dict[str, Any]:
         """
         Executes unified simulation of the specified path planning or RL algorithm.
@@ -247,59 +213,82 @@ class FlightEngine:
         # =====================================================================
         # Case A: 3D A* Search Baseline (Delegated directly to models/baselines.py)
         # =====================================================================
+        # Case A: 3D A* Search Baseline (Delegated directly to models/baselines.py)
+        # =====================================================================
         if planner_key == "astar":
             baseline = AStarJointBaseline(obstacles=obstacles, bounds=bounds, d_safe=phy.d_safe, obstacle_margin=margin)
-            return baseline.simulate_trajectory(
+            res = baseline.simulate_trajectory(
                 start=start, target=target, obstacles=obstacles, bounds=bounds,
                 d_safe=phy.d_safe, obstacle_margin=margin, v_max=phy.v_max, delta_t=phy.delta_t,
                 reach_tolerance=phy.reach_tolerance, max_steps=self.cfg.mappo.episode_length,
                 edge_server_pos=self.cfg.airspace.edge_server_pos
             )
+            res["mode"] = "single_uav_illustrative_inference"
+            res["scope_disclosure"] = "Visualizes single-agent 3D flight trajectory. Full multi-agent contention and cooperative MEC scheduling are evaluated in MultiUAVEnv benchmark."
+            return res
 
         # =====================================================================
         # Case B: 3D RRT* Baseline (Delegated directly to models/rrt_star.py)
         # =====================================================================
         elif planner_key == "rrt_star":
             baseline = RRTStarBaseline(obstacles=obstacles, bounds=bounds, d_safe=phy.d_safe, obstacle_margin=margin)
-            return baseline.simulate_trajectory(
+            res = baseline.simulate_trajectory(
                 start=start, target=target, obstacles=obstacles, bounds=bounds,
                 d_safe=phy.d_safe, obstacle_margin=margin, v_max=phy.v_max, delta_t=phy.delta_t,
                 reach_tolerance=phy.reach_tolerance, max_steps=self.cfg.mappo.episode_length,
                 seed=seed, edge_server_pos=self.cfg.airspace.edge_server_pos
             )
+            res["mode"] = "single_uav_illustrative_inference"
+            res["scope_disclosure"] = "Visualizes single-agent 3D flight trajectory. Full multi-agent contention and cooperative MEC scheduling are evaluated in MultiUAVEnv benchmark."
+            return res
 
         # =====================================================================
         # Case C: 3D SAPF Baseline (Delegated directly to models/apf.py)
         # =====================================================================
         elif planner_key == "sapf":
             baseline = SAPFBaseline(obstacles=obstacles, bounds=bounds, d_safe=phy.d_safe, obstacle_margin=margin, v_max=phy.v_max)
-            return baseline.simulate_trajectory(
+            res = baseline.simulate_trajectory(
                 start=start, target=target, obstacles=obstacles, bounds=bounds,
                 d_safe=phy.d_safe, obstacle_margin=margin, v_max=phy.v_max, delta_t=phy.delta_t,
                 reach_tolerance=phy.reach_tolerance, max_steps=self.cfg.mappo.episode_length,
                 edge_server_pos=self.cfg.airspace.edge_server_pos
             )
+            res["mode"] = "single_uav_illustrative_inference"
+            res["scope_disclosure"] = "Visualizes single-agent 3D flight trajectory. Full multi-agent contention and cooperative MEC scheduling are evaluated in MultiUAVEnv benchmark."
+            return res
 
         # =====================================================================
         # Case D: Hierarchical Hybrid A* + MAPPO (Delegated directly to models/astar.py)
         # =====================================================================
-        elif planner_key == "hybrid_astar_mappo":
+        elif planner_key in ["hybrid_astar_mappo", "hybrid_astar_mappo_zero", "hybrid_astar_mappo_res02"]:
+            w_res = 0.2 if planner_key == "hybrid_astar_mappo_res02" else 0.0
             hybrid = HybridAStarMAPPONavigator(
                 obstacles=obstacles, bounds=bounds, mappo_agent=self.agents.get("mappo_pure"),
                 d_safe=phy.d_safe, obstacle_margin=margin, v_max=phy.v_max, delta_t=phy.delta_t,
-                reach_tolerance=phy.reach_tolerance, residual_weight=0.0
+                reach_tolerance=phy.reach_tolerance, residual_weight=w_res
             )
-            return hybrid.simulate_trajectory(
+            res = hybrid.simulate_trajectory(
                 start=start, target=target, obstacles=obstacles, bounds=bounds,
                 d_safe=phy.d_safe, obstacle_margin=margin, v_max=phy.v_max, delta_t=phy.delta_t,
                 reach_tolerance=phy.reach_tolerance, max_steps=self.cfg.mappo.episode_length,
                 edge_server_pos=self.cfg.airspace.edge_server_pos
             )
+            res["mode"] = "single_uav_illustrative_inference"
+            res["scope_disclosure"] = "Visualizes single-agent 3D flight trajectory. Full multi-agent contention and cooperative MEC scheduling are evaluated in MultiUAVEnv benchmark."
+            return res
 
         # =====================================================================
         # Case E: MARL Policies (MAPPO, IPPO, MADDPG, CPPO)
         # =====================================================================
         elif planner_key in self.agents:
+            st = self.agent_status.get(planner_key, {})
+            if not st.get("loaded", False):
+                if not allow_untrained:
+                    raise RuntimeError(
+                        f"Cannot simulate flight for '{planner_key}': checkpoint is unavailable or incompatible ({st.get('error')}). "
+                        f"To preserve research integrity, untrained models cannot be evaluated as trained policies. "
+                        f"Pass allow_untrained=True to execute an explicitly labeled untrained smoke test."
+                    )
             agent = self.agents[planner_key]
             agent_names = {
                 "mappo_pure": "Proposed Pure MAPPO (No APF)",
@@ -311,6 +300,8 @@ class FlightEngine:
                 "cppo": "Centralized PPO (CPPO)"
             }
             agent_name = agent_names.get(planner_key, planner_key.upper())
+            if not st.get("loaded", False):
+                agent_name += " [UNTRAINED SMOKE-TEST]"
             curr_pos = np.copy(start)
             curr_vel = np.zeros(3, dtype=np.float32)
 
@@ -388,12 +379,16 @@ class FlightEngine:
             t_plan = (time.time() - t_start) * 1000.0
 
         final_d = float(np.linalg.norm(curr_pos - target))
-        if final_d <= phy.reach_tolerance or (planner_key == "hybrid_astar_mappo" and final_d <= 8.0):
+        if final_d <= phy.reach_tolerance:
             status = "GOAL_REACHED"
         elif status == "PATH_FOUND":
             status = "TIMEOUT / INCOMPLETE"
 
-        return self._package_result(status, planner_key, path_coords, explored_nodes, t_plan, steps_telemetry, obstacles, margin)
+        is_trained = self.agent_status.get(planner_key, {}).get("loaded", True)
+        if planner_key in self.agents and not is_trained:
+            status = f"{status} [UNTRAINED]"
+
+        return self._package_result(status, planner_key, path_coords, explored_nodes, t_plan, steps_telemetry, obstacles, margin, is_trained=is_trained)
 
     def _package_result(
         self,
@@ -404,7 +399,8 @@ class FlightEngine:
         t_plan: float,
         steps_telemetry: list,
         obstacles: list,
-        margin: float
+        margin: float,
+        is_trained: bool = True
     ) -> Dict[str, Any]:
         """Packages metrics and trajectory arrays into standardized JSON contract."""
         p_arr = np.array(path_coords)
@@ -421,7 +417,10 @@ class FlightEngine:
             "planning_time_ms": round(t_plan, 2),
             "min_clearance": round(min_overall_clearance, 2),
             "steps_count": len(path_coords) - 1,
-            "steps_telemetry": steps_telemetry
+            "steps_telemetry": steps_telemetry,
+            "mode": "single_uav_illustrative_inference",
+            "scope_disclosure": "Visualizes single-agent 3D flight trajectory. Full multi-agent contention and cooperative MEC scheduling are evaluated in MultiUAVEnv benchmark.",
+            "is_trained": is_trained
         }
 
     def compare_flights(
