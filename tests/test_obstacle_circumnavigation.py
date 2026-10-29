@@ -97,6 +97,11 @@ def test_detour_reward_correctness_valid_bypass():
 
     # Place UAV 0 in proximity of East obstacle (cx=142.5, cy=100.0, r=10.0)
     # Station is at (100 + 40, 100, 50) = (140, 100, 50)
+    # Place UAV 1, 2, 3 at station to strictly isolate UAV 0's detour reward calculation
+    for j in range(1, env.num_uavs):
+        env.positions[j] = env.stations[j].copy()
+        env.arrival_steps[j] = 0
+
     env.positions[0] = np.array([142.5, 85.0, 50.0], dtype=np.float32)
     env.stations[0] = np.array([142.5, 120.0, 50.0], dtype=np.float32)  # Target is North of obstacle
     env._prev_d_stations = {j: float(np.linalg.norm(env.positions[j] - env.stations[j])) for j in range(env.num_uavs)}

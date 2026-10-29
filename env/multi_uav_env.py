@@ -474,6 +474,7 @@ class MultiUAVEnv(gym.Env):
 
         gamma_shaping = float(getattr(self.cfg.mappo, "gamma", 0.99))
         d_scale = 10.0  # 10m scale for potential shaping
+        d_max = 120.0   # Bounded airspace diagonal maximum distance
 
         reward_progress = 0.0
         reward_station = 0.0
@@ -487,28 +488,26 @@ class MultiUAVEnv(gym.Env):
             curr_d = float(np.linalg.norm(self.positions[j] - self.stations[j]))
             prev_d = float(self._prev_d_stations.get(j, curr_d)) if hasattr(self, "_prev_d_stations") else curr_d
 
-            # Potential-Based Reward Shaping (PBRS, Ng, Harada, & Russell 1999):
-            # Potential function: Phi(s) = - ||p_j - s_j|| / d_scale
-            # F(s, s') = gamma * Phi(s') - Phi(s) = (prev_d - gamma * curr_d) / d_scale
+            # Pure Potential-Based Reward Shaping (PBRS, Ng, Harada, & Russell 1999):
+            # Monotonic non-negative potential: Phi(s) = (d_max - ||p_j - s_j||) / d_scale >= 0
+            # Under gamma < 1: F(s, s') = gamma * Phi(s') - Phi(s)
+            # - Toward goal: F > 0
+            # - Away from goal: F < 0
+            # - Hovering: F = (gamma - 1) * Phi < 0 (penalizes inaction)
+            # - Closed loops: sum_{t=0}^{K-1} gamma^t F = (gamma^K - 1) * Phi(s_0) <= 0 (strict telescoping)
+            phi_prev = (d_max - prev_d) / d_scale
+            phi_curr = (d_max - curr_d) / d_scale
+
             if self.arrival_steps[j] is not None and self.arrival_steps[j] < self.current_step:
-                # Absorbing goal terminal state: potential is 0, shaping is 0
+                # Absorbing goal terminal state: post-arrival shaping is 0
                 f_j = 0.0
             elif self.arrival_steps[j] is not None and self.arrival_steps[j] == self.current_step:
-                # Terminal arrival step: Phi(s') = 0 -> F = 0 - Phi(s) = prev_d / d_scale
-                f_j = 4.0 * (prev_d / d_scale)
-                reward_arrival += 80.0  # Distinct terminal goal achievement bonus
+                # Terminal arrival step: enters absorbing goal state
+                f_j = 4.0 * (gamma_shaping * phi_curr - phi_prev)
+                reward_arrival += 80.0  # Distinct terminal goal achievement milestone
             else:
-                # Standard PBRS transition
-                f_j = 4.0 * (prev_d - gamma_shaping * curr_d) / d_scale
-
-            # Obstacle Detour Consideration:
-            # If Euclidean distance temporarily increases during an active lateral detour, reward tangential progress
-            disp = self.positions[j] - prev_positions[j]
-            tan = compute_obstacle_clearance_tangent(prev_positions[j], self.stations[j], self.cfg.airspace.obstacles)
-            tan_prog = float(np.dot(disp[:2], tan))
-            tan_active = float(np.linalg.norm(tan)) > 0.5
-            if (prev_d - curr_d) < 0.0 and tan_prog > 0.05 and tan_active:
-                f_j += 2.0 * tan_prog
+                # Standard PBRS transition (strictly potential-based, zero non-potential terms)
+                f_j = 4.0 * (gamma_shaping * phi_curr - phi_prev)
 
             reward_progress += f_j
 
