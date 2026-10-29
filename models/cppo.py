@@ -7,6 +7,7 @@ Provides the upper-bound centralized coordination comparison against CTDE (MAPPO
 """
 
 import os
+import math
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -67,6 +68,8 @@ class CentralizedActorNetwork(nn.Module):
         self.offload_heads = nn.ModuleList([
             nn.Linear(hidden_dim, num_offload_actions) for _ in range(num_uavs)
         ])
+        self.bounded_gaussian: bool = True
+        self._last_raw_move = None
 
     def forward(self, state: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if state.shape[-1] == self.state_dim:
@@ -80,6 +83,7 @@ class CentralizedActorNetwork(nn.Module):
         offload_h = self.offload_backbone(offload_feat)
 
         raw_move = self.move_mean_head(nav_h).view(-1, self.num_uavs, 3)
+        self._last_raw_move = raw_move
         move_mean = torch.tanh(raw_move) * self.max_disp
         move_std = torch.exp(torch.clamp(self.move_log_std, -2.0, 0.5)).view(-1, self.num_uavs, 3)
 
@@ -90,33 +94,55 @@ class CentralizedActorNetwork(nn.Module):
 
     def sample_action(self, state: torch.Tensor, deterministic: bool = False):
         logits, mean, std = self.forward(state)
-        # logits shape: (batch, num_uavs, num_actions)
         dist_offload = Categorical(logits=logits)
-        dist_move = Normal(mean, std)
+        raw_move = self._last_raw_move if self._last_raw_move is not None else mean
 
-        if deterministic:
-            act_offload = torch.argmax(logits, dim=-1)
-            act_move = mean
+        if self.bounded_gaussian:
+            dist_u = Normal(raw_move, std)
+            if deterministic:
+                act_offload = torch.argmax(logits, dim=-1)
+                act_move = mean
+                u = torch.clamp(act_move / self.max_disp, -0.999999, 0.999999).atanh()
+                log_prob_u = dist_u.log_prob(u).sum(dim=[-1, -2])
+                log_prob_move = log_prob_u - (torch.log(1.0 - torch.tanh(u).pow(2) + 1e-6) + math.log(self.max_disp)).sum(dim=[-1, -2])
+            else:
+                act_offload = dist_offload.sample()
+                u = dist_u.sample()
+                act_move = torch.tanh(u) * self.max_disp
+                log_prob_u = dist_u.log_prob(u).sum(dim=[-1, -2])
+                log_prob_move = log_prob_u - (torch.log(1.0 - torch.tanh(u).pow(2) + 1e-6) + math.log(self.max_disp)).sum(dim=[-1, -2])
         else:
-            act_offload = dist_offload.sample()
-            act_move = dist_move.sample()
+            dist_move = Normal(mean, std)
+            if deterministic:
+                act_offload = torch.argmax(logits, dim=-1)
+                act_move = mean
+            else:
+                act_offload = dist_offload.sample()
+                act_move = dist_move.sample()
+            log_prob_move = dist_move.log_prob(act_move).sum(dim=[-1, -2])
 
         log_prob_offload = dist_offload.log_prob(act_offload).sum(dim=-1)
-        log_prob_move = dist_move.log_prob(act_move).sum(dim=[-1, -2])
         total_log_prob = log_prob_offload + log_prob_move
-
         return act_move, act_offload, total_log_prob
 
     def evaluate_actions(self, state: torch.Tensor, act_move: torch.Tensor, act_offload: torch.Tensor):
         logits, mean, std = self.forward(state)
         dist_offload = Categorical(logits=logits)
-        dist_move = Normal(mean, std)
+        raw_move = self._last_raw_move if self._last_raw_move is not None else mean
 
         log_prob_offload = dist_offload.log_prob(act_offload).sum(dim=-1)
-        log_prob_move = dist_move.log_prob(act_move).sum(dim=[-1, -2])
-        total_log_prob = log_prob_offload + log_prob_move
+        if self.bounded_gaussian:
+            u = torch.clamp(act_move / self.max_disp, -0.999999, 0.999999).atanh()
+            dist_u = Normal(raw_move, std)
+            log_prob_u = dist_u.log_prob(u).sum(dim=[-1, -2])
+            log_prob_move = log_prob_u - (torch.log(1.0 - torch.tanh(u).pow(2) + 1e-6) + math.log(self.max_disp)).sum(dim=[-1, -2])
+            entropy = dist_offload.entropy().sum(dim=-1) + dist_u.entropy().sum(dim=[-1, -2])
+        else:
+            dist_move = Normal(mean, std)
+            log_prob_move = dist_move.log_prob(act_move).sum(dim=[-1, -2])
+            entropy = dist_offload.entropy().sum(dim=-1) + dist_move.entropy().sum(dim=[-1, -2])
 
-        entropy = dist_offload.entropy().sum(dim=-1) + dist_move.entropy().sum(dim=[-1, -2])
+        total_log_prob = log_prob_offload + log_prob_move
         return total_log_prob, entropy
 
 class CentralizedCriticNetwork(nn.Module):

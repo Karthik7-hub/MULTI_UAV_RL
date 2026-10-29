@@ -350,20 +350,11 @@ class MADDPGAgent:
             w_c_ckpt = critic_state["net.0.weight"]
             w_c_curr = self.critic.net[0].weight
             if w_c_ckpt.shape != w_c_curr.shape:
-                diff = w_c_curr.shape[1] - w_c_ckpt.shape[1]
-                if diff == 12:  # Adaptation from 40-dim state to 52-dim state
-                    adapted_cw = torch.zeros_like(w_c_curr)
-                    # State adaptation across 4 UAVs
-                    for uav_idx in range(self.num_uavs):
-                        src = uav_idx * 10
-                        dst = uav_idx * 13
-                        adapted_cw[:, dst:dst+6] = w_c_ckpt[:, src:src+6]
-                        adapted_cw[:, dst+9] = w_c_ckpt[:, src+6]
-                        adapted_cw[:, dst+10:dst+13] = w_c_ckpt[:, src+7:src+10]
-                    # Action features (appended at the end of state)
-                    tot_act = self.total_action_dim
-                    adapted_cw[:, -tot_act:] = w_c_ckpt[:, -tot_act:]
-                    critic_state["net.0.weight"] = adapted_cw
+                raise RuntimeError(
+                    f"Incompatible MADDPG critic state dimension: checkpoint has input dim {w_c_ckpt.shape[1]} "
+                    f"but model requires {w_c_curr.shape[1]} (canonical 52-dim state with 3D goal direction). "
+                    f"Incompatible checkpoints are rejected fail-closed; retrain MADDPG under canonical 52-dim state space."
+                )
         self.critic.load_state_dict(critic_state)
         if "actor_opt" in ckpt:
             self.actor_opt.load_state_dict(ckpt["actor_opt"])

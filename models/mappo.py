@@ -6,6 +6,7 @@ Simultaneously optimizes:
 """
 
 import os
+import math
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -84,6 +85,8 @@ class ActorNetwork(nn.Module):
         nn.init.orthogonal_(self.offload_head.weight, gain=0.01)
         nn.init.constant_(self.offload_head.bias, 0.0)
         self.freeze_offload: bool = False
+        self.bounded_gaussian: bool = True
+        self._last_raw_move = None
 
     def compute_nominal_apf_guidance(self, obs: torch.Tensor) -> torch.Tensor:
         """Computes verified nominal APF controller vector with 2D cross-product directional steering."""
@@ -146,6 +149,7 @@ class ActorNetwork(nn.Module):
             # Variant A: Pure MAPPO (100% Neural Policy Output, Zero Injected Guidance)
             raw_move = learned_move
 
+        self._last_raw_move = raw_move
         move_mean = torch.tanh(raw_move) * self.max_disp
         move_std = torch.exp(torch.clamp(self.move_log_std, -1.5, 1.5))
         return offload_logits, move_mean, move_std
@@ -153,17 +157,33 @@ class ActorNetwork(nn.Module):
     def sample_action(self, obs: torch.Tensor, deterministic: bool = False):
         logits, mean, std = self.forward(obs)
         dist_offload = Categorical(logits=logits)
-        dist_move = Normal(mean, std)
+        raw_move = self._last_raw_move if self._last_raw_move is not None else mean
 
-        if deterministic:
-            act_offload = torch.argmax(logits, dim=-1)
-            act_move = mean
+        if self.bounded_gaussian:
+            dist_u = Normal(raw_move, std)
+            if deterministic:
+                act_offload = torch.argmax(logits, dim=-1)
+                act_move = mean
+                u = torch.clamp(act_move / self.max_disp, -0.999999, 0.999999).atanh()
+                log_prob_u = dist_u.log_prob(u).sum(dim=-1)
+                log_prob_move = log_prob_u - (torch.log(1.0 - torch.tanh(u).pow(2) + 1e-6) + math.log(self.max_disp)).sum(dim=-1)
+            else:
+                act_offload = dist_offload.sample()
+                u = dist_u.sample()
+                act_move = torch.tanh(u) * self.max_disp
+                log_prob_u = dist_u.log_prob(u).sum(dim=-1)
+                log_prob_move = log_prob_u - (torch.log(1.0 - torch.tanh(u).pow(2) + 1e-6) + math.log(self.max_disp)).sum(dim=-1)
         else:
-            act_offload = dist_offload.sample()
-            act_move = dist_move.sample()
+            dist_move = Normal(mean, std)
+            if deterministic:
+                act_offload = torch.argmax(logits, dim=-1)
+                act_move = mean
+            else:
+                act_offload = dist_offload.sample()
+                act_move = dist_move.sample()
+            log_prob_move = dist_move.log_prob(act_move).sum(dim=-1)
 
         log_prob_offload = dist_offload.log_prob(act_offload)
-        log_prob_move = dist_move.log_prob(act_move).sum(dim=-1)
         if self.freeze_offload:
             total_log_prob = log_prob_move
         else:
@@ -174,16 +194,26 @@ class ActorNetwork(nn.Module):
     def evaluate_actions(self, obs: torch.Tensor, act_move: torch.Tensor, act_offload: torch.Tensor):
         logits, mean, std = self.forward(obs)
         dist_offload = Categorical(logits=logits)
-        dist_move = Normal(mean, std)
+        raw_move = self._last_raw_move if self._last_raw_move is not None else mean
 
         log_prob_offload = dist_offload.log_prob(act_offload)
-        log_prob_move = dist_move.log_prob(act_move).sum(dim=-1)
+        if self.bounded_gaussian:
+            u = torch.clamp(act_move / self.max_disp, -0.999999, 0.999999).atanh()
+            dist_u = Normal(raw_move, std)
+            log_prob_u = dist_u.log_prob(u).sum(dim=-1)
+            log_prob_move = log_prob_u - (torch.log(1.0 - torch.tanh(u).pow(2) + 1e-6) + math.log(self.max_disp)).sum(dim=-1)
+            entropy = dist_u.entropy().sum(dim=-1)
+        else:
+            dist_move = Normal(mean, std)
+            log_prob_move = dist_move.log_prob(act_move).sum(dim=-1)
+            entropy = dist_move.entropy().sum(dim=-1)
+
         if self.freeze_offload:
             total_log_prob = log_prob_move
-            entropy = dist_move.entropy().sum(dim=-1)
         else:
             total_log_prob = log_prob_offload + log_prob_move
-            entropy = dist_offload.entropy() + dist_move.entropy().sum(dim=-1)
+            entropy = entropy + dist_offload.entropy()
+
         return total_log_prob, entropy
 
 class CriticNetwork(nn.Module):
@@ -521,6 +551,12 @@ class MAPPOAgent:
                     actor_state["nav_backbone.0.weight"] = adapted_w
                 elif w_ckpt.shape[0] == w_curr.shape[0] and w_ckpt.shape[1] == 18 and w_curr.shape[1] == 16:
                     actor_state["nav_backbone.0.weight"] = w_ckpt[:, :16]
+                else:
+                    raise RuntimeError(
+                        f"Incompatible actor navigation input dimension: checkpoint has input dim {w_ckpt.shape[1]} "
+                        f"but model requires {w_curr.shape[1]}. Incompatible checkpoints are rejected fail-closed; "
+                        f"retrain policy under the canonical observation space."
+                    )
 
         self.actor.load_state_dict(actor_state)
 
@@ -529,25 +565,11 @@ class MAPPOAgent:
             w_c_ckpt = critic_state["net.0.weight"]
             w_c_curr = self.critic.net[0].weight
             if w_c_ckpt.shape != w_c_curr.shape:
-                if w_c_ckpt.shape[0] == w_c_curr.shape[0] and w_c_ckpt.shape[1] == 40 and w_c_curr.shape[1] == 52:
-                    adapted_cw = torch.zeros_like(w_c_curr)
-                    for uav_idx in range(self.num_uavs):
-                        src = uav_idx * 10
-                        dst = uav_idx * 13
-                        adapted_cw[:, dst:dst+6] = w_c_ckpt[:, src:src+6]
-                        # rel_goal columns [dst+6:dst+9] are zero-initialized
-                        adapted_cw[:, dst+9] = w_c_ckpt[:, src+6]
-                        adapted_cw[:, dst+10:dst+13] = w_c_ckpt[:, src+7:src+10]
-                    critic_state["net.0.weight"] = adapted_cw
-                elif w_c_ckpt.shape[0] == w_c_curr.shape[0] and w_c_ckpt.shape[1] == 52 and w_c_curr.shape[1] == 40:
-                    adapted_cw = torch.zeros_like(w_c_curr)
-                    for uav_idx in range(self.num_uavs):
-                        src = uav_idx * 13
-                        dst = uav_idx * 10
-                        adapted_cw[:, dst:dst+6] = w_c_ckpt[:, src:src+6]
-                        adapted_cw[:, dst+6] = w_c_ckpt[:, src+9]
-                        adapted_cw[:, dst+7:dst+10] = w_c_ckpt[:, src+10:src+13]
-                    critic_state["net.0.weight"] = adapted_cw
+                raise RuntimeError(
+                    f"Incompatible critic state dimension: checkpoint has state dim {w_c_ckpt.shape[1]} "
+                    f"but model requires {w_c_curr.shape[1]} (canonical 52-dim state with 3D goal direction). "
+                    f"Incompatible checkpoints are rejected fail-closed; retrain critic under canonical 52-dim state space."
+                )
 
         self.critic.load_state_dict(critic_state)
         if "actor_opt" in ckpt:

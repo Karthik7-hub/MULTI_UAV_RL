@@ -360,3 +360,65 @@ def test_clean_checkout_artifact_independence():
     # Verify ARTIFACT_MANIFEST.md exists
     manifest_path = os.path.join(BASE_DIR, "ARTIFACT_MANIFEST.md")
     assert os.path.exists(manifest_path)
+
+
+# =========================================================================
+# Additional Integrity Verifications: Bounded Gaussian & Fail-Closed Checkpoints
+# =========================================================================
+def test_bounded_gaussian_policy_action_consistency():
+    """Verify mathematically rigorous Bounded Gaussian Policy via Tanh squashing with exact Jacobian adjustment."""
+    import math
+    from env.observation_builder import OBS_DIM
+    from models.mappo import ActorNetwork
+    from models.cppo import CentralizedActorNetwork
+
+    # 1. Decentralized ActorNetwork
+    actor = ActorNetwork()
+    obs = torch.randn(8, OBS_DIM)
+    act_move, act_off, lp_sample = actor.sample_action(obs, deterministic=False)
+    
+    # Strictly bounded in (-15.0, 15.0)
+    assert torch.all(torch.abs(act_move) < 15.0)
+    lp_eval, entropy = actor.evaluate_actions(obs, act_move, act_off)
+    diff = torch.max(torch.abs(lp_sample - lp_eval)).item()
+    assert diff < 1e-4, f"Decentralized log-probability mismatch: {diff}"
+
+    # 2. Centralized ActorNetwork
+    cactor = CentralizedActorNetwork(state_dim=52, num_uavs=4)
+    state = torch.randn(8, 52)
+    c_move, c_off, c_lp_sample = cactor.sample_action(state, deterministic=False)
+    assert torch.all(torch.abs(c_move) < 15.0)
+    c_lp_eval, c_entropy = cactor.evaluate_actions(state, c_move, c_off)
+    c_diff = torch.max(torch.abs(c_lp_sample - c_lp_eval)).item()
+    assert c_diff < 1e-4, f"Centralized log-probability mismatch: {c_diff}"
+
+
+def test_legacy_checkpoint_incompatibility_fails_closed():
+    """Verify incompatible 40-dim critic checkpoints fail closed with RuntimeError rather than silent weight surgery."""
+    import tempfile
+    from env.observation_builder import OBS_DIM
+    from models.mappo import MAPPOAgent
+    from models.maddpg import MADDPGAgent
+
+    with tempfile.NamedTemporaryFile(suffix=".pt", delete=False) as f:
+        ckpt_path = f.name
+
+    # Mock 40-dim checkpoint
+    agent_old = MAPPOAgent(OBS_DIM, state_dim=40, num_uavs=4)
+    agent_old.save_checkpoint(ckpt_path)
+
+    # Attempt to load into canonical 52-dim MAPPOAgent
+    agent_new = MAPPOAgent(OBS_DIM, state_dim=52, num_uavs=4)
+    with pytest.raises(RuntimeError) as exc_info:
+        agent_new.load_checkpoint(ckpt_path)
+    assert "Incompatible critic state dimension" in str(exc_info.value)
+    assert "canonical 52-dim state" in str(exc_info.value)
+
+    # Attempt to load into canonical 52-dim MADDPGAgent
+    maddpg_old = MADDPGAgent(OBS_DIM, state_dim=40, num_uavs=4)
+    maddpg_old.save_checkpoint(ckpt_path)
+
+    maddpg_new = MADDPGAgent(OBS_DIM, state_dim=52, num_uavs=4)
+    with pytest.raises(RuntimeError) as exc_info:
+        maddpg_new.load_checkpoint(ckpt_path)
+    assert "Incompatible MADDPG critic state dimension" in str(exc_info.value)
