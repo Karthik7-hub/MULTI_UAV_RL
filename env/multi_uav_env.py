@@ -474,7 +474,13 @@ class MultiUAVEnv(gym.Env):
 
         gamma_shaping = float(getattr(self.cfg.mappo, "gamma", 0.99))
         d_scale = 10.0  # 10m scale for potential shaping
-        d_max = 120.0   # Bounded airspace diagonal maximum distance
+        # True reachable bounding box diagonal: sqrt(200^2 + 200^2 + 100^2) = 300.0m
+        # Guarantees Phi(s) = (d_max - d(s)) / d_scale >= 0 for all reachable states in the airspace
+        d_max = float(np.linalg.norm([
+            self.cfg.airspace.x_max - self.cfg.airspace.x_min,
+            self.cfg.airspace.y_max - self.cfg.airspace.y_min,
+            self.cfg.airspace.z_max - self.cfg.airspace.z_min
+        ]))
 
         reward_progress = 0.0
         reward_station = 0.0

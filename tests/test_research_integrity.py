@@ -464,9 +464,24 @@ def test_pbrs_directionality():
     _, _, _, _, info_away = env.step(action_away)
     prog_away = info_away["reward_components"]["progress"]
 
+    # Hover in place: zero displacement
+    for j in range(env.num_uavs):
+        x, y = coords[j]
+        env.positions[j] = np.array([x, y, 10.0])
+    env._prev_d_stations = {j: float(np.linalg.norm(env.positions[j] - env.stations[j])) for j in range(env.num_uavs)}
+
+    action_hover = {
+        j: {"move": np.zeros(3, dtype=np.float32), "offload": 0}
+        for j in range(env.num_uavs)
+    }
+    _, _, _, _, info_hover = env.step(action_hover)
+    prog_hover = info_hover["reward_components"]["progress"]
+
+    # Rigorous PBRS ordering:
+    # Toward goal yields highest reward; inaction (hovering) is penalized; moving away is penalized most.
+    assert prog_toward > prog_hover, f"Expected prog_toward ({prog_toward}) > prog_hover ({prog_hover})"
+    assert prog_hover > prog_away, f"Expected prog_hover ({prog_hover}) > prog_away ({prog_away})"
     assert prog_toward > prog_away, f"Expected prog_toward ({prog_toward}) > prog_away ({prog_away})"
-    assert prog_toward > 0.0, f"Expected prog_toward > 0, got {prog_toward}"
-    assert prog_away < 0.0, f"Expected prog_away < 0, got {prog_away}"
 
 
 # =========================================================================
@@ -678,7 +693,12 @@ def test_pbrs_discounted_sum_loop_telescoping():
     env.reset(seed=42)
 
     gamma = float(getattr(cfg.mappo, "gamma", 0.99))
-    d_max = 120.0
+    d_max = float(np.linalg.norm([
+        cfg.airspace.x_max - cfg.airspace.x_min,
+        cfg.airspace.y_max - cfg.airspace.y_min,
+        cfg.airspace.z_max - cfg.airspace.z_min
+    ]))
+    assert d_max == 300.0, f"Airspace diagonal must be 300m, got {d_max}"
     d_scale = 10.0
 
     # Define a closed 16-step circular trajectory
@@ -714,4 +734,38 @@ def test_pbrs_discounted_sum_loop_telescoping():
     assert uav0_discounted_shaping <= 0.0, f"Discounted sum over closed loop must be <= 0, got {uav0_discounted_shaping}"
     # 2. In un-discounted limit, exact telescoping guarantees sum == 0
     assert abs(uav0_undiscounted_shaping) < 1e-6, f"Undiscounted sum over closed loop must be 0, got {uav0_undiscounted_shaping}"
+
+
+def test_pbrs_potential_non_negative_everywhere():
+    """
+    Verify that the potential Phi(s) = (d_max - d(s)) / d_scale is strictly non-negative
+    for all reachable positions and target stations in the 200x200x100 airspace.
+    The maximum Euclidean diagonal is sqrt(200^2 + 200^2 + 100^2) = 300m.
+    """
+    cfg = MasterConfig()
+    d_max = float(np.linalg.norm([
+        cfg.airspace.x_max - cfg.airspace.x_min,
+        cfg.airspace.y_max - cfg.airspace.y_min,
+        cfg.airspace.z_max - cfg.airspace.z_min
+    ]))
+    assert d_max == 300.0, f"Expected 300m diagonal, got {d_max}"
+
+    # Check extreme diagonal corners (0,0,0) to (200,200,100)
+    p_corner1 = np.array([0.0, 0.0, 0.0])
+    p_corner2 = np.array([200.0, 200.0, 100.0])
+    d_worst = float(np.linalg.norm(p_corner1 - p_corner2))
+    assert abs(d_worst - 300.0) < 1e-6
+
+    phi_worst = (d_max - d_worst) / 10.0
+    assert phi_worst >= 0.0, f"Expected non-negative potential at worst-case diagonal, got {phi_worst}"
+
+    # Sample 500 random position-station pairs across entire reachable airspace
+    np.random.seed(42)
+    for _ in range(500):
+        pos = np.random.uniform([0, 0, 0], [200, 200, 100])
+        station = np.random.uniform([0, 0, 0], [200, 200, 100])
+        d = float(np.linalg.norm(pos - station))
+        phi = (d_max - d) / 10.0
+        assert phi >= 0.0, f"Potential must be >= 0 everywhere, got phi={phi} for d={d}"
+
 

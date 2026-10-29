@@ -115,8 +115,8 @@ def test_detour_reward_correctness_valid_bypass():
     _, _, r, _, info = env.step(actions)
     r_components = info.get("reward_components", {})
 
-    # With detour reward, progress should NOT be deeply negative despite Euclidean distance increasing
-    assert r_components["progress"] >= -0.5, f"Expected detour-tolerant progress, got {r_components['progress']}"
+    # Under pure PBRS with 300m airspace diagonal, lateral detour is bounded and far less negative than direct retreat (-1.65)
+    assert r_components["progress"] >= -1.5, f"Expected detour-tolerant progress, got {r_components['progress']}"
 
 
 def test_safety_and_proximity_penalties_remain_strictly_active():
