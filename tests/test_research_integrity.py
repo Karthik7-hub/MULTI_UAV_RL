@@ -422,3 +422,237 @@ def test_legacy_checkpoint_incompatibility_fails_closed():
     with pytest.raises(RuntimeError) as exc_info:
         maddpg_new.load_checkpoint(ckpt_path)
     assert "Incompatible MADDPG critic state dimension" in str(exc_info.value)
+
+
+# =========================================================================
+# Issue 15: Potential-Based Reward Shaping Directionality
+# =========================================================================
+def test_pbrs_directionality():
+    """Verify moving toward the goal receives greater progress reward than moving away, all else equal."""
+    cfg = MasterConfig()
+    cfg.mappo.episode_length = 10
+    env = MultiUAVEnv(cfg)
+    env.reset(seed=42)
+
+    # Place UAV 0 at (20, 20, 10), Station 0 at (30, 20, 10) -> distance = 10m
+    env.positions[0] = np.array([20.0, 20.0, 10.0])
+    env.stations[0] = np.array([30.0, 20.0, 10.0])
+    env._prev_d_stations = {j: float(np.linalg.norm(env.positions[j] - env.stations[j])) for j in range(env.num_uavs)}
+
+    # Move toward station: +x direction
+    action_toward = {
+        j: {"move": np.array([1.5, 0.0, 0.0]) if j == 0 else np.zeros(3), "offload": 0}
+        for j in range(env.num_uavs)
+    }
+    _, _, _, _, info_toward = env.step(action_toward)
+    prog_toward = info_toward["reward_components"]["progress"]
+
+    # Reset positions back to (20, 20, 10)
+    env.positions[0] = np.array([20.0, 20.0, 10.0])
+    env._prev_d_stations = {j: float(np.linalg.norm(env.positions[j] - env.stations[j])) for j in range(env.num_uavs)}
+
+    # Move away from station: -x direction
+    action_away = {
+        j: {"move": np.array([-1.5, 0.0, 0.0]) if j == 0 else np.zeros(3), "offload": 0}
+        for j in range(env.num_uavs)
+    }
+    _, _, _, _, info_away = env.step(action_away)
+    prog_away = info_away["reward_components"]["progress"]
+
+    assert prog_toward > prog_away, f"Expected prog_toward ({prog_toward}) > prog_away ({prog_away})"
+    assert prog_toward > 0.0, f"Expected prog_toward > 0, got {prog_toward}"
+    assert prog_away < 0.0, f"Expected prog_away < 0, got {prog_away}"
+
+
+# =========================================================================
+# Issue 16: Terminal Goal Milestone Reward
+# =========================================================================
+def test_terminal_goal_reward_awarded_on_arrival():
+    """Verify reaching the goal receives the intended terminal reward (+80.0 per arriving UAV)."""
+    cfg = MasterConfig()
+    cfg.mappo.episode_length = 10
+    env = MultiUAVEnv(cfg)
+    env.reset(seed=42)
+
+    # Position UAV 0 just outside reach tolerance (e.g. 5.1m where reach_tolerance is 5.0m)
+    reach_tol = cfg.physics.reach_tolerance
+    env.positions[0] = env.stations[0] + np.array([reach_tol + 0.5, 0.0, 0.0])
+    env._prev_d_stations = {j: float(np.linalg.norm(env.positions[j] - env.stations[j])) for j in range(env.num_uavs)}
+    assert env.arrival_steps[0] is None
+
+    # Step UAV 0 inside reach tolerance
+    action = {
+        j: {"move": np.array([-1.0, 0.0, 0.0]) if j == 0 else np.zeros(3), "offload": 0}
+        for j in range(env.num_uavs)
+    }
+    _, _, _, _, info = env.step(action)
+
+    assert env.arrival_steps[0] is not None
+    assert info["reward_components"]["arrival"] >= 80.0, f"Expected arrival reward >= 80, got {info['reward_components']['arrival']}"
+
+    # Next step: UAV 0 remains at goal -> arrival milestone is not re-awarded
+    action_stay = {j: {"move": np.zeros(3), "offload": 0} for j in range(env.num_uavs)}
+    _, _, _, _, info2 = env.step(action_stay)
+    assert info2["reward_components"]["arrival"] == 0.0, "Milestone arrival bonus must only be awarded at instant of arrival"
+
+
+# =========================================================================
+# Issue 17: Terminal Timeout Failure Penalty
+# =========================================================================
+def test_timeout_failure_penalty_on_truncation():
+    """Verify failure to reach the goal by timeout is not rewarded as a successful outcome."""
+    cfg = MasterConfig()
+    cfg.mappo.episode_length = 3
+    env = MultiUAVEnv(cfg)
+    env.reset(seed=42)
+
+    # Put all UAVs far from stations
+    for j in range(env.num_uavs):
+        env.positions[j] = env.stations[j] + np.array([30.0, 30.0, 0.0])
+    env._prev_d_stations = {j: float(np.linalg.norm(env.positions[j] - env.stations[j])) for j in range(env.num_uavs)}
+
+    # Step until timeout without reaching goals
+    hover_action = {j: {"move": np.zeros(3), "offload": 0} for j in range(env.num_uavs)}
+    for t in range(cfg.mappo.episode_length - 1):
+        _, _, _, done, info = env.step(hover_action)
+        assert not done
+        assert info["reward_components"]["timeout_failure"] == 0.0
+
+    # Final step at episode horizon
+    _, _, _, done, info = env.step(hover_action)
+    assert done
+    assert info["truncated"]
+    assert not info["all_arrived"]
+    assert info["reward_components"]["timeout_failure"] <= -120.0, f"Expected <= -120, got {info['reward_components']['timeout_failure']}"
+
+
+# =========================================================================
+# Issue 18: Energy Savings Cannot Compensate for Mission Failure
+# =========================================================================
+def test_energy_savings_cannot_compensate_for_mission_failure():
+    """Verify saving energy alone cannot compensate for arbitrary failure to complete the mission."""
+    cfg = MasterConfig()
+    cfg.mappo.episode_length = 15
+    env = MultiUAVEnv(cfg)
+
+    # Trajectory 1: Hovering far from goal to save energy
+    env.reset(seed=101)
+    for j in range(env.num_uavs):
+        env.positions[j] = env.stations[j] + np.array([15.0, 0.0, 0.0])
+    env._prev_d_stations = {j: float(np.linalg.norm(env.positions[j] - env.stations[j])) for j in range(env.num_uavs)}
+    ret_hover = 0.0
+    hover_act = {j: {"move": np.zeros(3), "offload": 0} for j in range(env.num_uavs)}
+    for _ in range(cfg.mappo.episode_length):
+        _, _, r, done, info = env.step(hover_act)
+        ret_hover += r
+        if done:
+            break
+    arr_hover = info["arrival_rate"]
+
+    # Trajectory 2: Navigating actively toward destinations
+    env.reset(seed=101)
+    for j in range(env.num_uavs):
+        env.positions[j] = env.stations[j] + np.array([15.0, 0.0, 0.0])
+    env._prev_d_stations = {j: float(np.linalg.norm(env.positions[j] - env.stations[j])) for j in range(env.num_uavs)}
+    ret_nav = 0.0
+    for _ in range(cfg.mappo.episode_length):
+        nav_act = {}
+        for j in range(env.num_uavs):
+            disp = env.stations[j] - env.positions[j]
+            d = np.linalg.norm(disp)
+            vel = (disp / max(d, 1e-4)) * 3.0 if d > 1.0 else np.zeros(3)
+            nav_act[j] = {"move": vel, "offload": 0}
+        _, _, r, done, info = env.step(nav_act)
+        ret_nav += r
+        if done:
+            break
+    arr_nav = info["arrival_rate"]
+
+    assert arr_nav > arr_hover
+    assert ret_nav > ret_hover + 100.0, f"Navigating to goal ({ret_nav}) must decisively beat hovering ({ret_hover})"
+
+
+# =========================================================================
+# Issue 19: Reward Components Sum Reconciliation
+# =========================================================================
+def test_reward_components_sum_reconciliation():
+    """Verify reward components sum consistently to the recorded return for all steps."""
+    cfg = MasterConfig()
+    cfg.mappo.episode_length = 20
+    env = MultiUAVEnv(cfg)
+    env.reset(seed=42)
+
+    total_r = 0.0
+    total_components = 0.0
+
+    for _ in range(cfg.mappo.episode_length):
+        actions = {
+            j: {"move": np.random.uniform(-2, 2, size=3), "offload": np.random.randint(0, env.num_uavs + 1)}
+            for j in range(env.num_uavs)
+        }
+        _, _, r, done, info = env.step(actions)
+        step_comp_sum = sum(info["reward_components"].values())
+        assert abs(r - step_comp_sum) < 1e-4, f"Mismatch at step: r={r}, sum={step_comp_sum}"
+        total_r += r
+        total_components += step_comp_sum
+        if done:
+            break
+
+    assert abs(total_r - total_components) < 1e-4, f"Episode mismatch: total_r={total_r}, total_comp={total_components}"
+
+
+# =========================================================================
+# Issue 20: 20-Seed Validation Aggregation Order Invariance
+# =========================================================================
+def test_validation_20_seeds_order_invariance():
+    """Verify 20-seed validation metrics are completely invariant to seed iteration order."""
+    cfg = MasterConfig()
+    cfg.mappo.episode_length = 5
+    env = MultiUAVEnv(cfg)
+    agent = MAPPOAgent(env.obs_dim, env.state_dim, 4, 5, cfg.mappo.hidden_dim, device="cpu")
+
+    seeds_fwd = list(range(1001, 1021))
+    seeds_rev = list(reversed(seeds_fwd))
+
+    stats_fwd = evaluate_validation(env, agent, "mappo", val_seeds=seeds_fwd)
+    stats_rev = evaluate_validation(env, agent, "mappo", val_seeds=seeds_rev)
+
+    assert abs(stats_fwd["val_arrival_rate"] - stats_rev["val_arrival_rate"]) < 1e-5
+    assert abs(stats_fwd["val_return"] - stats_rev["val_return"]) < 1e-4
+    assert abs(stats_fwd["val_comp_rate"] - stats_rev["val_comp_rate"]) < 1e-4
+    assert abs(stats_fwd["val_score"] - stats_rev["val_score"]) < 1e-4
+    assert abs(stats_fwd["val_mean_final_dist"] - stats_rev["val_mean_final_dist"]) < 1e-4
+
+
+# =========================================================================
+# Issue 21: Checkpoint Selection Minimum Success Constraint
+# =========================================================================
+def test_checkpoint_selection_success_constraint():
+    """Verify checkpoint selection enforces minimum goal success constraint (>= 75%)."""
+    from train import compute_checkpoint_selection_score
+
+    # Checkpoint A: Higher return (3450), but failed goal arrival (35%)
+    score_a = compute_checkpoint_selection_score(
+        val_arrival_rate=35.0,
+        val_return=3450.0,
+        val_completion_rate=80.9,
+        val_mean_final_dist=18.5,
+        val_interventions=1.0,
+        min_arrival_threshold=75.0
+    )
+
+    # Checkpoint B: Lower return (2350), but passed goal arrival (80%)
+    score_b = compute_checkpoint_selection_score(
+        val_arrival_rate=80.0,
+        val_return=2350.0,
+        val_completion_rate=86.9,
+        val_mean_final_dist=3.2,
+        val_interventions=3.0,
+        min_arrival_threshold=75.0
+    )
+
+    # Checkpoint B MUST decisively beat Checkpoint A
+    assert score_b > score_a, f"Score B ({score_b}) must beat Score A ({score_a})"
+    # Score B has the +10,000 gate bonus for reaching >= 75% arrival
+    assert score_b > 10000.0
+    assert score_a < 10000.0

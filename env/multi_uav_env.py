@@ -463,56 +463,63 @@ class MultiUAVEnv(gym.Env):
         # - R_arrival   = +80.0 milestone bonus on arrival + 30.0 fleet coordination bonus.
         # - R_proximity = Continuous penalty & tangential guidance within 12m of obstacle surface.
         # ---------------------------------------------------------------------
-        # Multi-Objective Reward Design with Disentangled Progress & Offloading:
-        # Scale task reward so offloading (+0.2/task) does not overwhelm spatial navigation progress (+4.0 * delta_d)
+        # ---------------------------------------------------------------------
+        # 5. Composite Reward Function with Potential-Based Shaping (Ng et al. 1999)
+        # ---------------------------------------------------------------------
         reward_task = 0.2 * tasks_completed
         reward_deadline = -0.5 * deadline_misses
         reward_energy = -0.0002 * total_step_energy
         reward_delay = -0.2 * total_delay
-        reward_safety = -2.0 * min(4, interventions)
+        reward_safety = -1.5 * min(4, interventions)
+
+        gamma_shaping = float(getattr(self.cfg.mappo, "gamma", 0.99))
+        d_scale = 10.0  # 10m scale for potential shaping
 
         reward_progress = 0.0
         reward_station = 0.0
         reward_loiter = 0.0
         reward_arrival = 0.0
         reward_proximity = 0.0
-        reward_distance = 0.0
+        reward_timeout_failure = 0.0
 
         uavs_on_station = 0
         for j in range(self.num_uavs):
             curr_d = float(np.linalg.norm(self.positions[j] - self.stations[j]))
-            if hasattr(self, "_prev_d_stations") and j in self._prev_d_stations:
-                progress = self._prev_d_stations[j] - curr_d
+            prev_d = float(self._prev_d_stations.get(j, curr_d)) if hasattr(self, "_prev_d_stations") else curr_d
 
-                # Detour-Tolerant Progress Reward:
-                # If Euclidean distance increases during a valid lateral obstacle detour,
-                # neutralize the negative Euclidean penalty and reward tangential progress.
-                disp = self.positions[j] - prev_positions[j]
-                tan = compute_obstacle_clearance_tangent(prev_positions[j], self.stations[j], self.cfg.airspace.obstacles)
-                tan_prog = float(np.dot(disp[:2], tan))
-                tan_active = float(np.linalg.norm(tan)) > 0.5
+            # Potential-Based Reward Shaping (PBRS, Ng, Harada, & Russell 1999):
+            # Potential function: Phi(s) = - ||p_j - s_j|| / d_scale
+            # F(s, s') = gamma * Phi(s') - Phi(s) = (prev_d - gamma * curr_d) / d_scale
+            if self.arrival_steps[j] is not None and self.arrival_steps[j] < self.current_step:
+                # Absorbing goal terminal state: potential is 0, shaping is 0
+                f_j = 0.0
+            elif self.arrival_steps[j] is not None and self.arrival_steps[j] == self.current_step:
+                # Terminal arrival step: Phi(s') = 0 -> F = 0 - Phi(s) = prev_d / d_scale
+                f_j = 4.0 * (prev_d / d_scale)
+                reward_arrival += 80.0  # Distinct terminal goal achievement bonus
+            else:
+                # Standard PBRS transition
+                f_j = 4.0 * (prev_d - gamma_shaping * curr_d) / d_scale
 
-                if progress < 0.0 and tan_prog > 0.05 and tan_active:
-                    # Neutralize Euclidean penalty during valid obstacle detour and reward tangential progress
-                    reward_progress += 2.0 * tan_prog
-                else:
-                    reward_progress += 4.0 * progress
+            # Obstacle Detour Consideration:
+            # If Euclidean distance temporarily increases during an active lateral detour, reward tangential progress
+            disp = self.positions[j] - prev_positions[j]
+            tan = compute_obstacle_clearance_tangent(prev_positions[j], self.stations[j], self.cfg.airspace.obstacles)
+            tan_prog = float(np.dot(disp[:2], tan))
+            tan_active = float(np.linalg.norm(tan)) > 0.5
+            if (prev_d - curr_d) < 0.0 and tan_prog > 0.05 and tan_active:
+                f_j += 2.0 * tan_prog
 
-            # Continuous distance penalty to discourage wandering or hovering far from goal
-            reward_distance -= 0.02 * (curr_d / 20.0)
+            reward_progress += f_j
 
-            # Goal Arrival Milestone Bonus: +50.0 awarded at the instant of arrival
-            if self.arrival_steps[j] is not None and self.arrival_steps[j] == self.current_step:
-                reward_arrival += 50.0
-
+            # Station holding reward & anti-loitering damping
             if curr_d <= p_cfg.reach_tolerance:
                 uavs_on_station += 1
-                reward_station += 2.0  # Station keeping reward
-                # Anti-loitering: penalize high residual velocity when at station
+                reward_station += 2.0
                 if speeds[j] > 1.5:
                     reward_loiter -= 0.5 * (speeds[j] / p_cfg.v_max)
                 else:
-                    reward_station += 1.0  # Precision station holding bonus
+                    reward_station += 1.0  # Precision holding bonus
 
             # Airspace boundary proximity penalty (< 15m)
             p_j = self.positions[j]
@@ -521,34 +528,21 @@ class MultiUAVEnv(gym.Env):
                 p_j[1] - self.cfg.airspace.y_min, self.cfg.airspace.y_max - p_j[1]
             )
             if d_wall < 15.0:
-                reward_safety -= 1.5 * (15.0 - max(0.0, d_wall)) / 15.0
+                reward_safety -= 1.0 * (15.0 - max(0.0, d_wall)) / 15.0
 
-            # Smooth obstacle proximity penalty (< 10m from obstacle surface)
+            # Obstacle proximity penalty (< 8m from surface)
             for cx, cy, r, h in self.cfg.airspace.obstacles:
                 d_c = float(np.linalg.norm(self.positions[j][:2] - np.array([cx, cy])))
                 d_surf = d_c - r
-                if self.positions[j][2] <= h + 5.0 and d_surf < 10.0:
-                    reward_proximity -= 1.5 * (10.0 - max(0.0, d_surf)) / 10.0
+                if self.positions[j][2] <= h + 5.0 and d_surf < 8.0:
+                    reward_proximity -= 1.0 * (8.0 - max(0.0, d_surf)) / 8.0
 
         # Coordinated Fleet Mission Bonus when all UAVs reach designated stations
         if all(self.arrival_steps[k] is not None for k in range(self.num_uavs)):
             if any(self.arrival_steps[k] == self.current_step for k in range(self.num_uavs)):
-                reward_arrival += 30.0
+                reward_arrival += 40.0
 
-        reward = (reward_task + reward_deadline + reward_energy + reward_delay +
-                  reward_safety + reward_progress + reward_station + reward_loiter +
-                  reward_arrival + reward_proximity + reward_distance)
-
-        # Cache distances for next step progress calculation
-        self._prev_d_stations = {j: float(np.linalg.norm(self.positions[j] - self.stations[j])) for j in range(self.num_uavs)}
-
-        # Generate new stochastic Poisson tasks for the next step
-        self.current_tasks = {
-            j: self.task_gen.sample_task(j, self.current_step, self.rng, delta_t=self.cfg.physics.delta_t)
-            for j in range(self.num_uavs)
-        }
-
-        # Mission Termination Logic: Explicitly differentiate arrival, collision, and truncation
+        # Mission Termination & Truncation Logic
         all_arrived = all(self.arrival_steps[j] is not None for j in range(self.num_uavs))
         terminate_on_arrival = getattr(p_cfg, "terminate_on_arrival", False)
         terminate_on_collision = getattr(p_cfg, "terminate_on_collision", False)
@@ -561,6 +555,29 @@ class MultiUAVEnv(gym.Env):
 
         truncated = (self.current_step >= self.episode_length)
         done = terminated or truncated
+
+        # Terminal Timeout Failure Penalty:
+        # Applied when the episode reaches horizon without reaching the destination.
+        # Calibrated magnitude (-30.0 to -50.0 per UAV) strictly eliminates the reward
+        # advantage of loitering or stopping short to save energy/avoid safety penalties.
+        if truncated and not all_arrived:
+            for j in range(self.num_uavs):
+                if self.arrival_steps[j] is None:
+                    curr_d = float(np.linalg.norm(self.positions[j] - self.stations[j]))
+                    reward_timeout_failure -= (30.0 + 0.5 * min(40.0, curr_d))
+
+        reward = float(reward_progress + reward_arrival + reward_timeout_failure +
+                       reward_task + reward_deadline + reward_energy + reward_delay +
+                       reward_safety + reward_station + reward_loiter + reward_proximity)
+
+        # Cache distances for next step progress calculation
+        self._prev_d_stations = {j: float(np.linalg.norm(self.positions[j] - self.stations[j])) for j in range(self.num_uavs)}
+
+        # Generate new stochastic Poisson tasks for the next step
+        self.current_tasks = {
+            j: self.task_gen.sample_task(j, self.current_step, self.rng, delta_t=self.cfg.physics.delta_t)
+            for j in range(self.num_uavs)
+        }
 
         info = {
             "step_energy": total_step_energy,
@@ -592,17 +609,17 @@ class MultiUAVEnv(gym.Env):
             "offload_peer": len(peer_offloaders),
             "offload_local": len(local_executors),
             "reward_components": {
-                "task": reward_task,
-                "deadline": reward_deadline,
-                "energy": reward_energy,
-                "delay": reward_delay,
-                "safety": reward_safety,
-                "progress": reward_progress,
-                "station": reward_station,
-                "loiter": reward_loiter,
-                "arrival": reward_arrival,
-                "proximity": reward_proximity,
-                "distance": reward_distance
+                "progress": float(reward_progress),
+                "arrival": float(reward_arrival),
+                "timeout_failure": float(reward_timeout_failure),
+                "task": float(reward_task),
+                "deadline": float(reward_deadline),
+                "energy": float(reward_energy),
+                "delay": float(reward_delay),
+                "safety": float(reward_safety),
+                "station": float(reward_station),
+                "loiter": float(reward_loiter),
+                "proximity": float(reward_proximity)
             }
         }
         return self._get_observations(), self._get_global_state(), reward, done, info

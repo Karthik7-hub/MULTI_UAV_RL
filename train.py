@@ -48,14 +48,63 @@ except ImportError:
         def write(self, s, *args, **kwargs):
             print(s)
 
-def evaluate_validation(env: MultiUAVEnv, agent: Any, model_type: str, val_seeds: List[int] = [1001, 1002, 1003, 1004]) -> Dict[str, float]:
-    """Evaluates agent deterministically on held-out randomized 3D validation scenarios."""
+VAL_SEEDS = list(range(1001, 1021))  # 20 fixed reproducible validation seeds (metric quantum: 1.25%)
+REWARD_COMPONENT_KEYS = [
+    "progress", "arrival", "timeout_failure", "task",
+    "deadline", "energy", "delay", "safety", "station", "loiter", "proximity"
+]
+
+def compute_checkpoint_selection_score(
+    val_arrival_rate: float,
+    val_return: float,
+    val_completion_rate: float,
+    val_mean_final_dist: float,
+    val_interventions: float,
+    min_arrival_threshold: float = 75.0
+) -> float:
+    """
+    Multi-objective checkpoint selection score with strict minimum goal-success requirement.
+    
+    A candidate policy MUST satisfy the minimum goal-success threshold (val_arrival_rate >= min_arrival_threshold)
+    to receive an eligibility gate bonus (+10,000). Policies that fail to achieve this gate
+    are penalized and ranked primarily by goal distance and arrival rate, strictly preventing any model
+    from being selected as 'best' purely through energy or safety savings while failing to reach goals.
+    """
+    if val_arrival_rate >= min_arrival_threshold:
+        score = (
+            10000.0
+            + 100.0 * val_arrival_rate
+            + 10.0 * val_completion_rate
+            - 2.0 * val_mean_final_dist
+            - 5.0 * val_interventions
+            + 0.1 * val_return
+        )
+    else:
+        score = (
+            100.0 * val_arrival_rate
+            - 20.0 * val_mean_final_dist
+            - 5.0 * val_interventions
+        )
+    return float(score)
+
+def evaluate_validation(
+    env: MultiUAVEnv,
+    agent: Any,
+    model_type: str,
+    val_seeds: Optional[List[int]] = None,
+    min_arrival_threshold: float = 75.0
+) -> Dict[str, float]:
+    """Evaluates agent deterministically on held-out randomized 3D validation scenarios across 20 fixed seeds."""
+    if val_seeds is None:
+        val_seeds = VAL_SEEDS
+
     val_returns = []
     val_comp_rates = []
     val_energies = []
     val_interventions = []
     val_arrivals = []
     val_final_errs = []
+    val_comp_accum = {k: [] for k in REWARD_COMPONENT_KEYS}
 
     for s in val_seeds:
         scen = "nav_general" if s % 2 == 1 else "randomized"
@@ -65,6 +114,7 @@ def evaluate_validation(env: MultiUAVEnv, agent: Any, model_type: str, val_seeds
         ep_miss = 0
         ep_energy = 0.0
         ep_interv = 0
+        ep_comps = {k: 0.0 for k in REWARD_COMPONENT_KEYS}
 
         for _ in range(env.cfg.mappo.episode_length):
             if model_type == "cppo":
@@ -82,6 +132,11 @@ def evaluate_validation(env: MultiUAVEnv, agent: Any, model_type: str, val_seeds
             ep_miss += info["deadline_misses"]
             ep_energy += info["step_energy"]
             ep_interv += info["safety_interventions"]
+
+            rc = info.get("reward_components", {})
+            for k in REWARD_COMPONENT_KEYS:
+                ep_comps[k] += float(rc.get(k, 0.0))
+
             if done:
                 break
 
@@ -93,29 +148,39 @@ def evaluate_validation(env: MultiUAVEnv, agent: Any, model_type: str, val_seeds
         arr_cnt = sum(1 for a in info.get("arrival_steps", {}).values() if a is not None)
         val_arrivals.append((arr_cnt / env.num_uavs) * 100.0)
         val_final_errs.append(float(info.get("fleet_mean_goal_error", 50.0)))
+        for k in REWARD_COMPONENT_KEYS:
+            val_comp_accum[k].append(ep_comps[k])
 
     avg_arrival = float(np.mean(val_arrivals))
     avg_ret = float(np.mean(val_returns))
+    avg_comp_rate = float(np.mean(val_comp_rates))
     avg_interv = float(np.mean(val_interventions))
+    avg_energy = float(np.mean(val_energies))
     mean_final_err = float(np.mean(val_final_errs)) if val_final_errs else 50.0
     std_final_err = float(np.std(val_final_errs)) if val_final_errs else 0.0
-    # Checkpoint selection metric prioritizes navigation arrival and goal proximity:
-    if avg_arrival > 0.0:
-        val_score = 1000.0 + avg_arrival * 100.0 - 0.5 * mean_final_err - 2.0 * avg_interv
-    else:
-        # Strictly rank by how close the agent gets to the destination, never by task return
-        val_score = -mean_final_err - 2.0 * avg_interv
 
-    return {
+    val_score = compute_checkpoint_selection_score(
+        val_arrival_rate=avg_arrival,
+        val_return=avg_ret,
+        val_completion_rate=avg_comp_rate,
+        val_mean_final_dist=mean_final_err,
+        val_interventions=avg_interv,
+        min_arrival_threshold=min_arrival_threshold
+    )
+
+    out = {
         "val_return": avg_ret,
-        "val_comp_rate": float(np.mean(val_comp_rates)),
-        "val_energy": float(np.mean(val_energies)),
+        "val_comp_rate": avg_comp_rate,
+        "val_energy": avg_energy,
         "val_interventions": avg_interv,
         "val_arrival_rate": avg_arrival,
         "val_mean_final_dist": mean_final_err,
         "val_std_final_dist": std_final_err,
         "val_score": val_score
     }
+    for k in REWARD_COMPONENT_KEYS:
+        out[f"val_rew_{k}"] = float(np.mean(val_comp_accum[k]))
+    return out
 
 def train_mappo(
     num_episodes: int = 80,
@@ -237,6 +302,7 @@ def train_mappo(
         ep_interventions = 0
         last_terminated = False
         next_state = state
+        ep_rew_components = {k: 0.0 for k in REWARD_COMPONENT_KEYS}
 
         for t in range(cfg.mappo.episode_length):
             actions, act_move, act_offload, log_probs = agent.get_actions(obs, deterministic=False)
@@ -259,6 +325,10 @@ def train_mappo(
                 r -= info["reward_components"]["safety"]  # Remove safety penalty
 
             buffer.insert(obs, state, act_move, act_offload, log_probs, r, val, done, terminated=last_terminated)
+
+            rc = info.get("reward_components", {})
+            for k in REWARD_COMPONENT_KEYS:
+                ep_rew_components[k] += float(rc.get(k, 0.0))
 
             obs = next_obs
             state = next_state
@@ -301,24 +371,45 @@ def train_mappo(
         env_steps_per_sec = cum_env_steps / max(1e-4, total_env_time)
         updates_per_sec = ep / max(1e-4, total_update_time)
 
-        metrics.append({
+        rec_sum = float(sum(ep_rew_components.values()))
+        m_entry = {
             "episode": ep,
             "return": ep_reward,
+            "reconciled_return_sum": rec_sum,
             "completed_tasks": ep_completed,
             "deadline_misses": ep_missed,
             "completion_rate": comp_rate,
             "arrival_rate": arr_rate,
             "total_energy": ep_energy,
             "safety_interventions": ep_interventions,
-            "val_return": val_stats["val_return"],
-            "val_completion_rate": val_stats["val_comp_rate"],
-            "val_arrival_rate": val_stats["val_arrival_rate"],
-            "val_energy": val_stats["val_energy"],
-            "val_interventions": val_stats["val_interventions"],
+            "mean_goal_dist": float(info.get("fleet_mean_goal_error", 50.0)),
+            # Disentangled reward components
+            "rew_progress": ep_rew_components["progress"],
+            "rew_arrival": ep_rew_components["arrival"],
+            "rew_timeout_failure": ep_rew_components["timeout_failure"],
+            "rew_task": ep_rew_components["task"],
+            "rew_deadline": ep_rew_components["deadline"],
+            "rew_energy": ep_rew_components["energy"],
+            "rew_delay": ep_rew_components["delay"],
+            "rew_safety": ep_rew_components["safety"],
+            "rew_station": ep_rew_components["station"],
+            "rew_loiter": ep_rew_components["loiter"],
+            "rew_proximity": ep_rew_components["proximity"],
+            # Validation metrics
+            "val_return": val_stats.get("val_return", np.nan),
+            "val_completion_rate": val_stats.get("val_comp_rate", np.nan),
+            "val_arrival_rate": val_stats.get("val_arrival_rate", np.nan),
+            "val_energy": val_stats.get("val_energy", np.nan),
+            "val_interventions": val_stats.get("val_interventions", np.nan),
+            "val_mean_final_dist": val_stats.get("val_mean_final_dist", np.nan),
+            "val_score": val_stats.get("val_score", np.nan),
             "env_steps_per_sec": env_steps_per_sec,
             "updates_per_sec": updates_per_sec,
             "wall_clock_sec": time.time() - start_total_time
-        })
+        }
+        for k in REWARD_COMPONENT_KEYS:
+            m_entry[f"val_rew_{k}"] = val_stats.get(f"val_rew_{k}", np.nan)
+        metrics.append(m_entry)
 
         pbar.set_postfix({
             "Ret": f"{ep_reward:6.1f}",
