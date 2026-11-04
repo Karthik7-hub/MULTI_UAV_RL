@@ -40,47 +40,55 @@ warnings.filterwarnings("ignore")
 # Publication-Grade Style Sheet
 # ---------------------------------------------------------------------------
 PALETTE = {
-    "mappo_pure":     "#0284c7",   # Deep vibrant sky blue (matches publication style)
-    "mappo_residual": "#8b5cf6",   # Violet
-    "ippo":           "#e6550d",   # Rich vivid orange (matches publication style)
-    "maddpg":         "#ec4899",   # Pink
-    "cppo":           "#10b981",   # Emerald
-    "astar":          "#6b7280",   # Grey
-    "astar_greedy":   "#374151",   # Dark grey
-    "hybrid_zero":    "#f59e0b",   # Amber
-    "hybrid_res02":   "#84cc16",   # Lime
-    "hybrid_res05":   "#14b8a6",   # Teal
-    "apf_only":       "#ef4444",   # Red
-    "rrt_star":       "#a855f7",   # Purple
-    "sapf":           "#fb923c",   # Light orange
+    "mappo_pure":      "#0284c7",   # Deep vibrant sky blue (Pure MAPPO CTDE)
+    "mappo_residual":  "#8b5cf6",   # Violet (Residual MAPPO)
+    "ippo":            "#e6550d",   # Rich vivid orange (IPPO DTDE)
+    "ippo_residual":   "#d97706",   # Amber / Gold (Residual IPPO)
+    "maddpg":          "#ec4899",   # Pink (MADDPG Off-Policy)
+    "maddpg_residual": "#f43f5e",   # Rose red (Residual MADDPG)
+    "cppo":            "#10b981",   # Emerald green (CPPO CTCE Upper Bound)
+    "astar":           "#6b7280",   # Grey
+    "astar_greedy":    "#374151",   # Dark grey
+    "hybrid_zero":     "#f59e0b",   # Amber
+    "hybrid_res02":    "#84cc16",   # Lime
+    "hybrid_res05":    "#14b8a6",   # Teal
+    "apf_only":        "#ef4444",   # Red
+    "rrt_star":        "#a855f7",   # Purple
+    "sapf":            "#fb923c",   # Light orange
 }
 
 DISPLAY_NAMES = {
-    "mappo_pure":    "Pure MAPPO",
-    "mappo_residual":"Residual MAPPO",
-    "ippo":          "IPPO",
-    "maddpg":        "MADDPG",
-    "cppo":          "CPPO",
-    "astar":         "3D A*",
-    "astar_greedy":  "A* + Greedy MEC",
+    "mappo_pure":      "Pure MAPPO (CTDE)",
+    "mappo_residual":  "Residual MAPPO",
+    "ippo":            "IPPO (DTDE)",
+    "ippo_residual":   "Residual IPPO",
+    "maddpg":          "MADDPG (Off-Policy)",
+    "maddpg_residual": "Residual MADDPG",
+    "cppo":            "CPPO (CTCE Bound)",
+    "astar":           "3D A*",
+    "astar_greedy":    "A* + Greedy MEC",
 }
 
 LINESTYLES = {
-    "mappo_pure": "-",
-    "mappo_residual": "-",
-    "ippo": "--",
-    "maddpg": "-.",
-    "cppo": ":",
-    "astar": (0, (5, 2)),
+    "mappo_pure":      "-",
+    "mappo_residual":  "-",
+    "ippo":            "--",
+    "ippo_residual":   "--",
+    "maddpg":          "-.",
+    "maddpg_residual": "-.",
+    "cppo":            ":",
+    "astar":           (0, (5, 2)),
 }
 
 MARKERS = {
-    "mappo_pure": "o",
-    "mappo_residual": "s",
-    "ippo": "^",
-    "maddpg": "D",
-    "cppo": "v",
-    "astar": "*",
+    "mappo_pure":      "o",
+    "mappo_residual":  "s",
+    "ippo":            "^",
+    "ippo_residual":   "^",
+    "maddpg":          "D",
+    "maddpg_residual": "D",
+    "cppo":            "v",
+    "astar":           "*",
 }
 
 def set_pub_style(usetex: bool = False):
@@ -155,11 +163,13 @@ def save(fig, path, tight=True, formats=("png", "pdf")):
 def load_training_logs(res_dir: str):
     """Load all available algorithm training logs into a dict."""
     files = {
-        "mappo_pure":    "training_logs_mappo_pure.csv",
-        "mappo_residual":"training_logs_mappo_residual.csv",
-        "ippo":          "training_logs_ippo_pure.csv",
-        "maddpg":        "training_logs_maddpg_pure.csv",
-        "cppo":          "training_logs_cppo.csv",
+        "mappo_pure":      "training_logs_mappo_pure.csv",
+        "mappo_residual":  "training_logs_mappo_residual.csv",
+        "ippo":            "training_logs_ippo_pure.csv",
+        "ippo_residual":   "training_logs_ippo_residual.csv",
+        "maddpg":          "training_logs_maddpg_pure.csv",
+        "maddpg_residual": "training_logs_maddpg_residual.csv",
+        "cppo":            "training_logs_cppo.csv",
     }
     dfs = {}
     for key, fn in files.items():
@@ -288,7 +298,7 @@ def plot_wide_publication_curve(
     - Clean boxed legend with subtle border
     """
     if target_algorithms is None:
-        target_keys = [k for k in ["mappo_pure", "ippo", "mappo_residual"] if k in dfs]
+        target_keys = list(dfs.keys())
     else:
         target_keys = [k for k in target_algorithms if k in dfs]
 
@@ -340,12 +350,13 @@ def plot_wide_publication_curve(
         smooth_val = pd.Series(raw).rolling(window=w, min_periods=1).mean().values
         
         c = PALETTE.get(k, "#0284c7")
+        ls = LINESTYLES.get(k, "-")
         lab = DISPLAY_NAMES.get(k, k)
 
-        # Raw trace
-        ax.plot(ep, raw, color=c, linewidth=0.75, alpha=0.22, zorder=2)
-        # Smoothed line
-        ax.plot(ep, smooth_val, color=c, linewidth=2.4, label=lab, zorder=3)
+        # Raw trace (faint background)
+        ax.plot(ep, raw, color=c, linestyle=ls, linewidth=0.65, alpha=0.18, zorder=2)
+        # Smoothed line (bold foreground)
+        ax.plot(ep, smooth_val, color=c, linestyle=ls, linewidth=2.3, label=lab, zorder=3)
 
     title_text = f"{ep_prefix} Training: {title_suffix}"
     ax.set_title(title_text, fontsize=13, pad=10, fontfamily="sans-serif")
@@ -357,7 +368,8 @@ def plot_wide_publication_curve(
     if y_step:
         ax.yaxis.set_major_locator(ticker.MultipleLocator(y_step))
 
-    leg = ax.legend(loc=legend_loc, frameon=True, framealpha=0.95, edgecolor="#d1d5db", fontsize=10.5)
+    ncols = 3 if len(valid_keys) >= 5 else (2 if len(valid_keys) >= 3 else 1)
+    leg = ax.legend(loc=legend_loc, ncol=ncols, frameon=True, framealpha=0.95, edgecolor="#d1d5db", fontsize=9.5)
     leg.get_frame().set_linewidth(0.8)
 
     save(fig, out_path)
@@ -365,10 +377,13 @@ def plot_wide_publication_curve(
 
 
 def fig_clean_wide_suite(dfs: dict, fig_dir: str):
-    """Generates the full suite of wide-format single-panel publication figures."""
-    print("[Wide Figures] Generating wide-format publication curves matching user styling …")
+    """Generates the full suite of wide-format single-panel publication figures with ALL models."""
+    print("[Wide Figures] Generating wide-format publication curves for ALL MARL models …")
     
-    # 1. Task Completion Rate (Pure MAPPO vs IPPO - exact match)
+    # Target all MARL algorithms present in logs
+    all_marl_keys = [k for k in ["mappo_pure", "mappo_residual", "ippo", "maddpg", "cppo", "ippo_residual", "maddpg_residual"] if k in dfs]
+    
+    # 1. Task Completion Rate (ALL MARL Models)
     p_comp = os.path.join(fig_dir, "fig_task_completion_rate_wide.png")
     plot_wide_publication_curve(
         dfs,
@@ -377,28 +392,28 @@ def fig_clean_wide_suite(dfs: dict, fig_dir: str):
         title_suffix="Task Completion Rate",
         out_path=p_comp,
         legend_loc="lower left",
-        target_algorithms=["mappo_pure", "ippo"],
+        target_algorithms=all_marl_keys,
         ylim=(55, 101),
         y_step=10,
         window=30,
     )
     
-    # 1b. Task Completion Rate (All available MARL algorithms)
-    p_comp_all = os.path.join(fig_dir, "fig_task_completion_rate_all_marl_wide.png")
+    # 1b. Task Completion Rate (Pure MAPPO vs IPPO pairwise comparison)
+    p_comp_pair = os.path.join(fig_dir, "fig_task_completion_rate_pure_vs_ippo.png")
     plot_wide_publication_curve(
         dfs,
         metric_col="completion_rate",
         ylabel="Task Completion Rate (%)",
-        title_suffix="Task Completion Rate (All MARL)",
-        out_path=p_comp_all,
+        title_suffix="Task Completion Rate (MAPPO vs IPPO)",
+        out_path=p_comp_pair,
         legend_loc="lower left",
-        target_algorithms=["mappo_pure", "mappo_residual", "ippo", "maddpg", "cppo"],
+        target_algorithms=["mappo_pure", "ippo"],
         ylim=(55, 101),
         y_step=10,
         window=30,
     )
 
-    # 2. Episode Return (Pure MAPPO vs IPPO - exact match)
+    # 2. Episode Return (ALL MARL Models)
     p_ret = os.path.join(fig_dir, "fig_episode_return_wide.png")
     plot_wide_publication_curve(
         dfs,
@@ -407,26 +422,26 @@ def fig_clean_wide_suite(dfs: dict, fig_dir: str):
         title_suffix="Episode Return (smoothed w=30)",
         out_path=p_ret,
         legend_loc="upper right",
+        target_algorithms=all_marl_keys,
+        y_step=250,
+        window=30,
+    )
+
+    # 2b. Episode Return (Pure MAPPO vs IPPO pairwise comparison)
+    p_ret_pair = os.path.join(fig_dir, "fig_episode_return_pure_vs_ippo.png")
+    plot_wide_publication_curve(
+        dfs,
+        metric_col="return",
+        ylabel="Episode Return",
+        title_suffix="Episode Return (MAPPO vs IPPO, smoothed w=30)",
+        out_path=p_ret_pair,
+        legend_loc="upper right",
         target_algorithms=["mappo_pure", "ippo"],
         y_step=250,
         window=30,
     )
 
-    # 2b. Episode Return (All MARL)
-    p_ret_all = os.path.join(fig_dir, "fig_episode_return_all_marl_wide.png")
-    plot_wide_publication_curve(
-        dfs,
-        metric_col="return",
-        ylabel="Episode Return",
-        title_suffix="Episode Return (All MARL, smoothed w=30)",
-        out_path=p_ret_all,
-        legend_loc="upper right",
-        target_algorithms=["mappo_pure", "mappo_residual", "ippo", "maddpg", "cppo"],
-        y_step=250,
-        window=30,
-    )
-
-    # 3. Fleet Energy
+    # 3. Fleet Energy (ALL MARL Models)
     p_ene = os.path.join(fig_dir, "fig_fleet_energy_wide.png")
     plot_wide_publication_curve(
         dfs,
@@ -435,11 +450,11 @@ def fig_clean_wide_suite(dfs: dict, fig_dir: str):
         title_suffix="Fleet Mechanical & Comm Energy (smoothed w=30)",
         out_path=p_ene,
         legend_loc="upper right",
-        target_algorithms=["mappo_pure", "ippo", "mappo_residual"],
+        target_algorithms=all_marl_keys,
         window=30,
     )
 
-    # 4. Safety Interventions
+    # 4. Safety Interventions (ALL MARL Models)
     p_safe = os.path.join(fig_dir, "fig_safety_interventions_wide.png")
     plot_wide_publication_curve(
         dfs,
@@ -448,11 +463,11 @@ def fig_clean_wide_suite(dfs: dict, fig_dir: str):
         title_suffix="Safety Filter Interventions (smoothed w=30)",
         out_path=p_safe,
         legend_loc="upper right",
-        target_algorithms=["mappo_pure", "ippo", "mappo_residual"],
+        target_algorithms=all_marl_keys,
         window=30,
     )
 
-    # 5. UAV Navigation Arrival Rate
+    # 5. UAV Navigation Arrival Rate (ALL MARL Models)
     p_arr = os.path.join(fig_dir, "fig_arrival_rate_wide.png")
     plot_wide_publication_curve(
         dfs,
@@ -461,7 +476,7 @@ def fig_clean_wide_suite(dfs: dict, fig_dir: str):
         title_suffix="UAV Navigation Arrival Rate (smoothed w=30)",
         out_path=p_arr,
         legend_loc="lower right",
-        target_algorithms=["mappo_pure", "ippo", "mappo_residual"],
+        target_algorithms=all_marl_keys,
         ylim=(-2, 105),
         y_step=20,
         window=30,
