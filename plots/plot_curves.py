@@ -945,7 +945,7 @@ def plot_all_marl_training_convergence(csv_dict: dict, save_path: str):
     fig, axes = plt.subplots(2, 2, figsize=(15, 11), dpi=300)
     palette = {
         "mappo": {"name": "Proposed Joint MAPPO (CTDE)", "color": "#0284c7", "ls": "-", "lw": 2.5},
-        "ippo": {"name": "Independent PPO (DTDE)", "color": "#059669", "ls": "-.", "lw": 2.0},
+        "ippo": {"name": "Independent PPO (DTDE)", "color": "#e6550d", "ls": "-", "lw": 2.2},
         "maddpg": {"name": "Multi-Agent DDPG (Off-Policy)", "color": "#8b5cf6", "ls": ":", "lw": 2.0},
         "cppo": {"name": "Centralized PPO (CTCE Upper Bound)", "color": "#dc2626", "ls": "--", "lw": 2.0}
     }

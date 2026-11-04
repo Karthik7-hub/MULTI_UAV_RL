@@ -647,11 +647,12 @@ class MultiUAVEnv(gym.Env):
         for j in range(self.num_uavs):
             p_j = self.positions[j] / 200.0
             v_j = self.velocities[j] / self.cfg.physics.v_max
+            vec_s = (self.stations[j] - self.positions[j]) / 200.0
             d_s = np.array([np.linalg.norm(self.positions[j] - self.stations[j]) / 200.0])
             task = self.current_tasks[j]
             if task is not None:
                 t_f = np.array([task.cycles / 1.5e9, task.data_size / 3e6, task.deadline / 3.0])
             else:
                 t_f = np.zeros(3)
-            parts.extend([p_j, v_j, d_s, t_f])
+            parts.extend([p_j, v_j, vec_s, d_s, t_f])
         return np.concatenate(parts).astype(np.float32)

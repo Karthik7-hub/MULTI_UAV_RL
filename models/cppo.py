@@ -29,12 +29,20 @@ class CentralizedActorNetwork(nn.Module):
         # Offload features: pos, task, dist for all 4 UAVs (7 * 4 = 28 dims)
         self.nav_indices = []
         self.offload_indices = []
-        for j in range(num_uavs):
-            self.nav_indices.extend([j * 10 + k for k in range(7)])
-            self.offload_indices.extend([j * 10 + 0, j * 10 + 1, j * 10 + 2, j * 10 + 6, j * 10 + 7, j * 10 + 8, j * 10 + 9])
-        
-        self.nav_dim = len(self.nav_indices) if state_dim == 40 else state_dim
-        self.offload_dim = len(self.offload_indices) if state_dim == 40 else state_dim
+        if state_dim == 52:
+            for j in range(num_uavs):
+                # 10 nav features: pos(0:3), vel(3:6), vec_s(6:9), dist_s(9)
+                self.nav_indices.extend([j * 13 + k for k in range(10)])
+                # 7 offload features: pos(0:3), dist_s(9), task(10:13)
+                self.offload_indices.extend([j * 13 + 0, j * 13 + 1, j * 13 + 2, j * 13 + 9, j * 13 + 10, j * 13 + 11, j * 13 + 12])
+            self.nav_dim = 40
+            self.offload_dim = 28
+        else:
+            for j in range(num_uavs):
+                self.nav_indices.extend([j * 10 + k for k in range(7)])
+                self.offload_indices.extend([j * 10 + 0, j * 10 + 1, j * 10 + 2, j * 10 + 6, j * 10 + 7, j * 10 + 8, j * 10 + 9])
+            self.nav_dim = len(self.nav_indices) if state_dim == 40 else state_dim
+            self.offload_dim = len(self.offload_indices) if state_dim == 40 else state_dim
 
         self.nav_backbone = nn.Sequential(
             nn.Linear(self.nav_dim, hidden_dim * 2),
@@ -60,7 +68,7 @@ class CentralizedActorNetwork(nn.Module):
         ])
 
     def forward(self, state: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        if state.shape[-1] == 40:
+        if state.shape[-1] in [40, 52]:
             nav_feat = state[..., self.nav_indices]
             offload_feat = state[..., self.offload_indices]
         else:

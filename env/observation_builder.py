@@ -55,7 +55,7 @@ OFFLOAD_FEATURE_INDICES: List[int] = list(range(0, 3)) + list(range(10, 17))
 OFFLOAD_DIM: int = len(OFFLOAD_FEATURE_INDICES)  # Exactly 10 dimensions
 
 # Centralized Critic Global State per UAV: pos (3), vel (3), station_dist (1), task (3)
-STATE_DIM_PER_UAV: int = 10
+STATE_DIM_PER_UAV: int = 13
 
 
 def compute_data_rate_to_edge(
