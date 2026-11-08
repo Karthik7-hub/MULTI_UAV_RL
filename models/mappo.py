@@ -89,23 +89,31 @@ class ActorNetwork(nn.Module):
         station_vec = obs[:, 6:9]
         dist = torch.norm(station_vec, dim=-1, keepdim=True) * 200.0
         dir_to_station = station_vec / (torch.norm(station_vec, dim=-1, keepdim=True) + 1e-6)
-        # Suppress attractor velocity when close to station to enable stable hovering (prevents orbiting)
-        guidance = dir_to_station * torch.clamp((dist - 3.5) / 10.0, 0.0, 1.0)
+        # Smooth terminal attractor scaling: slows down inside 10m to dock smoothly into station
+        guidance = dir_to_station * torch.clamp(dist / 10.0, 0.0, 1.0)
 
-        # Lateral obstacle avoidance prior using dynamic slice (last 3 features independent of num_uavs)
-        obs_vec_xy = obs[:, -3:-1]
-        obs_dist = obs[:, -1:] * 50.0
+        # In observation_builder.py (OBS_DIM = 22):
+        # obs[:, 17:19]: 2D Direction Vector to Closest Obstacle [dx/d, dy/d]
+        # obs[:, 19:20]: Distance to Closest Obstacle Surface (normalized by 50.0m)
+        # obs[:, 20:22]: 2D Obstacle Clearance Tangent Vector [tx, ty]
+        obs_vec_xy = obs[:, 17:19]
+        obs_dist = obs[:, 19:20] * 50.0
+        tangent_precomputed = obs[:, 20:22]
         obs_dot = (dir_to_station[:, :2] * obs_vec_xy).sum(dim=-1, keepdim=True)
-        
+
         # 2D cross-product to detect whether obstacle is on left or right of flight path:
         # cross > 0 means obstacle is to the LEFT -> steer RIGHT (-tangent)
         # cross < 0 means obstacle is to the RIGHT -> steer LEFT (+tangent)
         cross_2d = dir_to_station[:, 0:1] * obs_vec_xy[:, 1:2] - dir_to_station[:, 1:2] * obs_vec_xy[:, 0:1]
         sign_turn = torch.where(cross_2d >= 0.0, -torch.ones_like(cross_2d), torch.ones_like(cross_2d))
         tangent_xy = torch.stack([-obs_vec_xy[:, 1], obs_vec_xy[:, 0]], dim=-1) * sign_turn
-        
+
+        # Prefer precomputed analytical clearance tangent when available; fall back to tangent_xy
+        tangent_norm = torch.norm(tangent_precomputed, dim=-1, keepdim=True)
+        effective_tangent = torch.where(tangent_norm > 0.1, tangent_precomputed, tangent_xy)
+
         avoid_weight = torch.clamp((25.0 - obs_dist) / 20.0, 0.0, 1.8) * torch.clamp(obs_dot, 0.0, 1.0)
-        avoid_vector = 1.0 * tangent_xy - 0.6 * obs_vec_xy
+        avoid_vector = 1.0 * effective_tangent - 0.6 * obs_vec_xy
 
         # Add vertical climbing component when obstacle directly blocks horizontal path,
         # but permit descent if the goal is below and avoid over-climbing above obstacles
@@ -127,13 +135,14 @@ class ActorNetwork(nn.Module):
         offload_logits = self.offload_head(offload_features)
         learned_move = self.move_mean_head(nav_features)
 
+        station_vec = obs[:, 6:9]
+        dist = torch.norm(station_vec, dim=-1, keepdim=True) * 200.0
+
         if self.policy_variant == "residual":
             # Variant B: Residual RL (Nominal APF + Learned Policy Correction)
             nominal_guidance = self.compute_nominal_apf_guidance(obs)
             if self.enable_terminal_damping:
-                station_vec = obs[:, 6:9]
-                dist = torch.norm(station_vec, dim=-1, keepdim=True) * 200.0
-                rl_terminal_damping = torch.clamp((dist - 3.5) / 10.0, 0.0, 1.0)
+                rl_terminal_damping = torch.clamp((dist - 1.0) / 8.0, 0.0, 1.0)
                 raw_move = (0.4 * rl_terminal_damping) * learned_move + 2.0 * nominal_guidance
             else:
                 raw_move = 0.4 * learned_move + 2.0 * nominal_guidance
@@ -145,7 +154,9 @@ class ActorNetwork(nn.Module):
             # Variant A: Pure MAPPO (100% Neural Policy Output, Zero Injected Guidance)
             raw_move = learned_move
 
-        move_mean = torch.tanh(raw_move) * self.max_disp
+        # Proportional speed bounding near goal prevents overshoot / orbiting limit cycles
+        allowed_disp = torch.clamp(dist * 0.8, 0.3, self.max_disp)
+        move_mean = torch.tanh(raw_move) * allowed_disp
         move_std = torch.exp(torch.clamp(self.move_log_std, -1.5, 1.5))
         return offload_logits, move_mean, move_std
 

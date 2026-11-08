@@ -106,8 +106,9 @@ def evaluate_episode(env: MultiUAVEnv, model_key: str, agent: Any, seed: int = 1
             actions = agent.select_actions(obs)
         elif model_key == "cppo":
             actions, _, _, _ = agent.get_actions(state, deterministic=True)
-        elif model_key == "maddpg":
-            actions, _ = agent.get_actions(obs, explore=False)
+        elif "maddpg" in model_key or hasattr(agent, "critic_target"):
+            res = agent.get_actions(obs, explore=False)
+            actions = res[0] if isinstance(res, tuple) else res
         elif hasattr(agent, "get_actions"):
             actions, _, _, _ = agent.get_actions(obs, deterministic=True)
         else:
@@ -341,11 +342,21 @@ def run_evaluation(
     ippo_p = find_ckpt(["best_ippo_pure_agent.pt", "final_ippo_pure_agent.pt", "best_ippo_agent.pt", "final_ippo_agent.pt"])
     if ippo_p:
         ippo.load_checkpoint(ippo_p)
-        print(f"[Loaded Checkpoint] IPPO from {ippo_p}")
+        print(f"[Loaded Checkpoint] IPPO Pure from {ippo_p}")
         loaded_ippo = True
     elif strict_ckpts and model_filter in ["all", "ippo", "marl"]:
         raise FileNotFoundError(f"Missing required checkpoint for IPPO across {ckpt_dirs}!")
     agents["ippo"] = ippo
+
+    # 4b. Residual Independent PPO (Hybrid APF+DTDE)
+    ippo_res = IPPOAgent(env.obs_dim, num_uavs, num_uavs + 1, cfg.mappo.hidden_dim, policy_variant="residual", device=dev)
+    loaded_ippo_res = False
+    ippo_res_p = find_ckpt(["best_ippo_residual_agent.pt", "final_ippo_residual_agent.pt"])
+    if ippo_res_p:
+        ippo_res.load_checkpoint(ippo_res_p)
+        print(f"[Loaded Checkpoint] Residual IPPO from {ippo_res_p}")
+        loaded_ippo_res = True
+    agents["ippo_residual"] = ippo_res
 
     # 5. Multi-Agent DDPG (MADDPG)
     maddpg = MADDPGAgent(env.obs_dim, env.state_dim, num_uavs, num_uavs + 1, cfg.mappo.hidden_dim, policy_variant="pure", device=dev)
@@ -353,11 +364,21 @@ def run_evaluation(
     maddpg_p = find_ckpt(["best_maddpg_pure_agent.pt", "final_maddpg_pure_agent.pt", "best_maddpg_agent.pt", "final_maddpg_agent.pt"])
     if maddpg_p:
         maddpg.load_checkpoint(maddpg_p)
-        print(f"[Loaded Checkpoint] MADDPG from {maddpg_p}")
+        print(f"[Loaded Checkpoint] MADDPG Pure from {maddpg_p}")
         loaded_maddpg = True
     elif strict_ckpts and model_filter in ["all", "maddpg", "marl"]:
         raise FileNotFoundError(f"Missing required checkpoint for MADDPG across {ckpt_dirs}!")
     agents["maddpg"] = maddpg
+
+    # 5b. Residual Multi-Agent DDPG (Hybrid APF+DDPG)
+    maddpg_res = MADDPGAgent(env.obs_dim, env.state_dim, num_uavs, num_uavs + 1, cfg.mappo.hidden_dim, policy_variant="residual", device=dev)
+    loaded_maddpg_res = False
+    maddpg_res_p = find_ckpt(["best_maddpg_residual_agent.pt", "final_maddpg_residual_agent.pt"])
+    if maddpg_res_p:
+        maddpg_res.load_checkpoint(maddpg_res_p)
+        print(f"[Loaded Checkpoint] Residual MADDPG from {maddpg_res_p}")
+        loaded_maddpg_res = True
+    agents["maddpg_residual"] = maddpg_res
 
     # 6. Centralized PPO (CPPO)
     cppo = CPPOAgent(env.state_dim, num_uavs, num_uavs + 1, cfg.mappo.hidden_dim, device=dev)
@@ -398,8 +419,10 @@ def run_evaluation(
         ("APF-Assisted Residual MAPPO (with Terminal Damping)", "mappo_residual"),
         ("APF-Assisted Residual MAPPO (Undamped / Historical Orbiting)", "mappo_residual_undamped"),
         ("Proposed Pure MAPPO (8.4k updates, Zero APF Guidance)", "mappo_pure"),
-        ("Independent PPO (IPPO, DTDE)", "ippo"),
-        ("Multi-Agent DDPG (MADDPG)", "maddpg"),
+        ("Independent PPO (IPPO Pure, DTDE)", "ippo"),
+        ("Residual IPPO (Hybrid APF+DTDE)", "ippo_residual"),
+        ("Multi-Agent DDPG (MADDPG Pure)", "maddpg"),
+        ("Residual MADDPG (Hybrid APF+DDPG)", "maddpg_residual"),
         ("Centralized PPO (CPPO, CTCE)", "cppo"),
     ]
 
@@ -426,10 +449,14 @@ def run_evaluation(
             print(f"[Notice] Skipping '{label}': Residual MAPPO checkpoint not found.")
             continue
         if key == "ippo" and not loaded_ippo:
-            print(f"[Notice] Skipping '{label}': IPPO checkpoint not found.")
+            print(f"[Notice] Skipping '{label}': IPPO Pure checkpoint not found.")
+            continue
+        if key == "ippo_residual" and not loaded_ippo_res:
             continue
         if key == "maddpg" and not loaded_maddpg:
-            print(f"[Notice] Skipping '{label}': MADDPG checkpoint not found.")
+            print(f"[Notice] Skipping '{label}': MADDPG Pure checkpoint not found.")
+            continue
+        if key == "maddpg_residual" and not loaded_maddpg_res:
             continue
         if key == "cppo" and not loaded_cppo:
             print(f"[Notice] Skipping '{label}': CPPO checkpoint not found.")
@@ -595,14 +622,15 @@ def run_evaluation(
     # Generate Publication Figures if requested
     if save_plots:
         try:
-            diag_path = os.path.join(fig_dir, "trajectory_diagnostic_comparison.png")
-            plot_trajectory_diagnostic(
-                astar_data=first_seed_results["astar_edge"],
-                mappo_data=first_seed_results.get("mappo_residual", first_seed_results["mappo_pure"]),
-                obstacles=cfg.airspace.obstacles,
-                stations=env.stations,
-                save_path=diag_path
-            )
+            if "astar_edge" in first_seed_results:
+                diag_path = os.path.join(fig_dir, "trajectory_diagnostic_comparison.png")
+                plot_trajectory_diagnostic(
+                    astar_data=first_seed_results["astar_edge"],
+                    mappo_data=first_seed_results.get("mappo_residual", first_seed_results.get("mappo_pure")),
+                    obstacles=cfg.airspace.obstacles,
+                    stations=env.stations,
+                    save_path=diag_path
+                )
 
             multi_curve_path = os.path.join(fig_dir, "multimodel_performance_curves.png")
             avail_curves = {}
@@ -632,12 +660,20 @@ def run_evaluation(
             plot_pareto_latency_energy(pareto_dict, os.path.join(fig_dir, "pareto_latency_energy_tradeoff.png"))
 
             # Figure 9: 3D Trajectories
-            plot_3d_flight_trajectories(
-                eval_results={"mappo": first_seed_results.get("mappo_residual", first_seed_results.get("mappo_pure", None)), "astar": first_seed_results.get("astar_edge", None)},
-                obstacles=cfg.airspace.obstacles,
-                stations=env.stations,
-                save_path=os.path.join(fig_dir, "3d_flight_trajectories.png")
-            )
+            plot_results = {}
+            if "mappo_residual" in first_seed_results:
+                plot_results["mappo"] = first_seed_results["mappo_residual"]
+            elif "mappo_pure" in first_seed_results:
+                plot_results["mappo"] = first_seed_results["mappo_pure"]
+            if "astar_edge" in first_seed_results:
+                plot_results["astar"] = first_seed_results["astar_edge"]
+            if plot_results:
+                plot_3d_flight_trajectories(
+                    eval_results=plot_results,
+                    obstacles=cfg.airspace.obstacles,
+                    stations=env.stations,
+                    save_path=os.path.join(fig_dir, "3d_flight_trajectories.png")
+                )
         except Exception as e:
             print(f"[Warning] Figure generation encountered an issue: {e}")
 

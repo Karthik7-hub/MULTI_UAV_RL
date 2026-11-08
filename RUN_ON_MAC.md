@@ -1,108 +1,129 @@
-# 🍏 Complete Multi-UAV Experiment Guide for macOS (Apple Silicon M-Series)
+# 🚀 Complete Multi-UAV Experiment & Execution Guide (macOS · Windows · Linux)
 
-This guide provides clean, copy-paste terminal commands to train **ALL MARL models and baselines**, run the multi-seed evaluation, generate the publication curves (displaying all models), and sync tables and figures on macOS (MacBook Air / Pro with M1, M2, M3, M4, or M5 chips).
+This guide provides tested, copy-paste commands and automated scripts to train **ALL MARL models and baselines**, run the 5-seed benchmark evaluation, generate publication-grade per-episode figures, and sync all tables and figures directly to the LaTeX manuscript.
 
 ---
 
-## ⚡ Option 1: Run ALL Models in One Shot (Copy & Paste)
+## ⚡ Option 1: Run ALL in One Shot
 
-Open **Terminal** on your Mac, navigate to the project directory, and paste this single block.
-
-> [!TIP]
-> The `caffeinate` wrapper prevents your Mac from sleeping or throttling while training unattended overnight.
+### 🍏 macOS (Terminal / Apple Silicon & Intel)
+The `caffeinate` wrapper keeps your Mac awake and running at full performance even overnight:
 
 ```bash
-# 1. Navigate to the project directory
+# Navigate to workspace
 cd ~/research_v2
 
-# 2. Run the complete pipeline under caffeinate (prevents Mac sleep)
+# Run full pipeline with sleep prevention
+caffeinate -dimsu bash run_experiments.sh
+```
+
+*(Alternatively, paste the entire inline block:)*
+```bash
+cd ~/research_v2
 caffeinate -dimsu bash -c '
 set -e
-
-echo "=== [0/8] Setting up Python Virtual Environment ==="
-if [ ! -d ".venv" ]; then
-    python3 -m venv .venv
-fi
+if [ ! -d ".venv" ]; then python3 -m venv .venv; fi
 source .venv/bin/activate
 pip install --upgrade pip
 pip install -r requirements.txt
 
-echo "=== [1/8] Training Proposed Pure MAPPO (CTDE, 1000 Episodes, Seed 42) ==="
-python train.py --model mappo --variant pure --episodes 1000 --seed 42 --device auto
+python train.py --model mappo --variant pure --episodes 1000 --eval_freq 1 --seed 42 --device auto
+python train.py --model mappo --variant residual --episodes 1000 --eval_freq 1 --seed 42 --device auto
+python train.py --model ippo --variant pure --episodes 1000 --eval_freq 1 --seed 42 --device auto
+python train.py --model ippo --variant residual --episodes 1000 --eval_freq 1 --seed 42 --device auto
+python train.py --model maddpg --variant pure --episodes 1000 --eval_freq 1 --seed 42 --device auto
+python train.py --model maddpg --variant residual --episodes 1000 --eval_freq 1 --seed 42 --device auto
+python train.py --model cppo --episodes 1000 --eval_freq 1 --seed 42 --device auto
 
-echo "=== [2/8] Training Proposed Residual MAPPO (Hybrid APF+RL, 1000 Episodes, Seed 42) ==="
-python train.py --model mappo --variant residual --episodes 1000 --seed 42 --device auto
-
-echo "=== [3/8] Training Independent PPO (IPPO Pure, DTDE, 1000 Episodes, Seed 42) ==="
-python train.py --model ippo --variant pure --episodes 1000 --seed 42 --device auto
-
-echo "=== [4/8] Training Residual IPPO (Hybrid APF+DTDE, 1000 Episodes, Seed 42) ==="
-python train.py --model ippo --variant residual --episodes 1000 --seed 42 --device auto
-
-echo "=== [5/8] Training Multi-Agent DDPG (MADDPG Pure, 1000 Episodes, Seed 42) ==="
-python train.py --model maddpg --variant pure --episodes 1000 --seed 42 --device auto
-
-echo "=== [6/8] Training Residual MADDPG (Hybrid APF+DDPG, 1000 Episodes, Seed 42) ==="
-python train.py --model maddpg --variant residual --episodes 1000 --seed 42 --device auto
-
-echo "=== [7/8] Training Centralized PPO (CPPO Theoretical Bound, 1000 Episodes, Seed 42) ==="
-python train.py --model cppo --episodes 1000 --seed 42 --device auto
-
-echo "=== [8/8] Evaluating ALL 12 Algorithms Across 5 Held-Out Seeds (101-105) ==="
 python evaluate.py --num_seeds 5 --strict_ckpts --device auto
+python generate_publication_plots.py --res_dir results --fig_dir results/publication_figures_v3 --per_episode --dpi 300
 
-echo "=== Generating All-Model Publication Plots & Wide Curves (300 DPI) ==="
-python generate_publication_plots.py --res_dir results --fig_dir results/publication_figures_v3 --dpi 300
-
-echo "=== Syncing Results to research_paper/ Directory ==="
 mkdir -p research_paper/tables research_paper/figures
-cp results/*.csv research_paper/tables/
-cp results/publication_figures_v3/*.png research_paper/figures/
-
-# Enable \includegraphics in LaTeX manuscript
-python -c "
-import re
-tex_path = \"research_paper/manuscript/research_paper.tex\"
-with open(tex_path, \"r\") as f:
-    c = f.read()
-c = c.replace(\"% \\\\includegraphics\", \"\\\\includegraphics\")
-c = re.sub(r\"\\\\fbox\\{\\\\parbox\\{.*?\\}\\}\", \"\", c, flags=re.DOTALL)
-with open(tex_path, \"w\") as f:
-    f.write(c)
-print(\"  [DONE] Enabled figures in research_paper.tex\")
-"
-
-echo "=========================================================="
-echo " [SUCCESS] All Models Trained, Evaluated, and Synced!"
-echo " Checkpoints: results/checkpoints/"
-echo " CSV Tables:  research_paper/tables/"
-echo " Figures:     research_paper/figures/"
-echo "=========================================================="
+cp results/*.csv research_paper/tables/ 2>/dev/null || true
+cp results/publication_figures_v3/*.png research_paper/figures/ 2>/dev/null || true
+echo "[DONE] Complete suite executed and synced successfully!"
 '
 ```
 
 ---
 
-## 🛠 Option 2: Step-by-Step Copy & Paste (Individual Models)
+### 🐧 Linux (Ubuntu / Debian / CentOS / Arch)
+Run directly in your terminal, or with `nohup` for background execution on a remote server/GPU cluster:
 
-If you prefer to train, evaluate, and plot specific models individually:
-
-### Step 0: Set Up Environment & Dependencies
 ```bash
+# Navigate to workspace
 cd ~/research_v2
-python3 -m venv .venv
-source .venv/bin/activate
-pip install --upgrade pip
-pip install -r requirements.txt
+
+# Make script executable and run
+chmod +x run_experiments.sh
+./run_experiments.sh
 ```
+
+*(For remote servers over SSH without disconnection risk:)*
+```bash
+nohup ./run_experiments.sh > training_suite.log 2>&1 &
+tail -f training_suite.log
+```
+
+---
+
+### 🪟 Windows (PowerShell)
+Open **PowerShell** (or Windows Terminal) in your project directory:
+
+```powershell
+# Navigate to workspace
+cd "c:\Users\vkart\Music\WORK\SEM\SEM_7\Minor_project\research_v2"
+
+# Run full pipeline script
+powershell -ExecutionPolicy Bypass -File .\run_experiments.ps1
+```
+
+*(Alternatively, paste this inline block into PowerShell:)*
+```powershell
+if (-not (Test-Path ".venv")) { python -m venv .venv }
+& ".\.venv\Scripts\Activate.ps1"
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+
+python train.py --model mappo --variant pure --episodes 1000 --eval_freq 1 --seed 42 --device auto
+python train.py --model mappo --variant residual --episodes 1000 --eval_freq 1 --seed 42 --device auto
+python train.py --model ippo --variant pure --episodes 1000 --eval_freq 1 --seed 42 --device auto
+python train.py --model ippo --variant residual --episodes 1000 --eval_freq 1 --seed 42 --device auto
+python train.py --model maddpg --variant pure --episodes 1000 --eval_freq 1 --seed 42 --device auto
+python train.py --model maddpg --variant residual --episodes 1000 --eval_freq 1 --seed 42 --device auto
+python train.py --model cppo --episodes 1000 --eval_freq 1 --seed 42 --device auto
+
+python evaluate.py --num_seeds 5 --strict_ckpts --device auto
+python generate_publication_plots.py --res_dir results --fig_dir results/publication_figures_v3 --per_episode --dpi 300
+
+New-Item -ItemType Directory -Force -Path "research_paper/tables", "research_paper/figures" | Out-Null
+Copy-Item results/*.csv -Destination research_paper/tables/ -Force
+Copy-Item results/publication_figures_v3/*.png -Destination research_paper/figures/ -Force
+Write-Host "[DONE] Complete suite executed and synced successfully!" -ForegroundColor Green
+```
+
+---
+
+## 🛠 Option 2: Step-by-Step Execution (Individual Models)
+
+If you prefer to train, evaluate, and inspect models individually:
+
+### Step 0: Activate Environment
+* **macOS / Linux:**
+  ```bash
+  source .venv/bin/activate
+  ```
+* **Windows PowerShell:**
+  ```powershell
+  .\.venv\Scripts\Activate.ps1
+  ```
 
 ---
 
 ### Step 1: Proposed Pure MAPPO (1000 Episodes)
 *Centralized Training with Decentralized Execution (CTDE) — Pure neural policy.*
 ```bash
-source .venv/bin/activate
-python train.py --model mappo --variant pure --episodes 1000 --seed 42 --device auto
+python train.py --model mappo --variant pure --episodes 1000 --eval_freq 1 --seed 42 --device auto
 ```
 * **Checkpoint:** `results/checkpoints/best_mappo_pure_agent.pt`
 * **Log:** `results/training_logs_mappo_pure.csv`
@@ -112,8 +133,7 @@ python train.py --model mappo --variant pure --episodes 1000 --seed 42 --device 
 ### Step 2: Proposed Residual MAPPO (1000 Episodes)
 *Hybrid architecture: Classical Artificial Potential Field (APF) nominal guidance + learned residual DRL corrections ($k_{\mathrm{rl}} = 0.5$).*
 ```bash
-source .venv/bin/activate
-python train.py --model mappo --variant residual --episodes 1000 --seed 42 --device auto
+python train.py --model mappo --variant residual --episodes 1000 --eval_freq 1 --seed 42 --device auto
 ```
 * **Checkpoint:** `results/checkpoints/best_mappo_residual_agent.pt`
 * **Log:** `results/training_logs_mappo_residual.csv`
@@ -121,10 +141,9 @@ python train.py --model mappo --variant residual --episodes 1000 --seed 42 --dev
 ---
 
 ### Step 3: Independent PPO (IPPO Pure, 1000 Episodes)
-*Decentralized Training with Decentralized Execution (DTDE) baseline — Selfish policy without centralized critic.*
+*Decentralized Training with Decentralized Execution (DTDE) baseline — Local critic per UAV.*
 ```bash
-source .venv/bin/activate
-python train.py --model ippo --variant pure --episodes 1000 --seed 42 --device auto
+python train.py --model ippo --variant pure --episodes 1000 --eval_freq 1 --seed 42 --device auto
 ```
 * **Checkpoint:** `results/checkpoints/best_ippo_pure_agent.pt`
 * **Log:** `results/training_logs_ippo_pure.csv`
@@ -132,10 +151,9 @@ python train.py --model ippo --variant pure --episodes 1000 --seed 42 --device a
 ---
 
 ### Step 4: Residual IPPO (1000 Episodes)
-*Hybrid nominal APF guidance + learned residual IPPO policy.*
+*Hybrid nominal APF guidance + learned decentralized residual IPPO policy.*
 ```bash
-source .venv/bin/activate
-python train.py --model ippo --variant residual --episodes 1000 --seed 42 --device auto
+python train.py --model ippo --variant residual --episodes 1000 --eval_freq 1 --seed 42 --device auto
 ```
 * **Checkpoint:** `results/checkpoints/best_ippo_residual_agent.pt`
 * **Log:** `results/training_logs_ippo_residual.csv`
@@ -143,10 +161,9 @@ python train.py --model ippo --variant residual --episodes 1000 --seed 42 --devi
 ---
 
 ### Step 5: Multi-Agent DDPG (MADDPG Pure, 1000 Episodes)
-*Continuous off-policy actor-critic baseline with centralized Q-critic.*
+*Continuous off-policy actor-critic baseline with centralized Q-critic and decaying exploration.*
 ```bash
-source .venv/bin/activate
-python train.py --model maddpg --variant pure --episodes 1000 --seed 42 --device auto
+python train.py --model maddpg --variant pure --episodes 1000 --eval_freq 1 --seed 42 --device auto
 ```
 * **Checkpoint:** `results/checkpoints/best_maddpg_pure_agent.pt`
 * **Log:** `results/training_logs_maddpg_pure.csv`
@@ -156,8 +173,7 @@ python train.py --model maddpg --variant pure --episodes 1000 --seed 42 --device
 ### Step 6: Residual MADDPG (1000 Episodes)
 *Hybrid nominal APF guidance + learned off-policy MADDPG policy.*
 ```bash
-source .venv/bin/activate
-python train.py --model maddpg --variant residual --episodes 1000 --seed 42 --device auto
+python train.py --model maddpg --variant residual --episodes 1000 --eval_freq 1 --seed 42 --device auto
 ```
 * **Checkpoint:** `results/checkpoints/best_maddpg_residual_agent.pt`
 * **Log:** `results/training_logs_maddpg_residual.csv`
@@ -165,94 +181,69 @@ python train.py --model maddpg --variant residual --episodes 1000 --seed 42 --de
 ---
 
 ### Step 7: Centralized PPO (CPPO, 1000 Episodes)
-*Centralized Training with Centralized Execution (CTCE) — Single centralized policy controlling all UAVs (theoretical benchmark).*
+*Centralized Training with Centralized Execution (CTCE) — Theoretical benchmark.*
 ```bash
-source .venv/bin/activate
-python train.py --model cppo --episodes 1000 --seed 42 --device auto
+python train.py --model cppo --episodes 1000 --eval_freq 1 --seed 42 --device auto
 ```
 * **Checkpoint:** `results/checkpoints/best_cppo_agent.pt`
 * **Log:** `results/training_logs_cppo.csv`
 
 ---
 
-### Step 8: MAPPO Ablation Studies (Optional, 1000 Episodes each)
+### Step 8: Multi-Seed Benchmark Evaluation Across 5 Seeds
+*Evaluates all algorithms deterministically across held-out seeds (101, 102, 103, 104, 105).*
 ```bash
-source .venv/bin/activate
-
-# Ablation 1: No energy awareness in reward function
-python train.py --model ablation --ablation no_energy --episodes 1000 --seed 42 --device auto
-
-# Ablation 2: No continuous analytical safety shield
-python train.py --model ablation --ablation no_safety --episodes 1000 --seed 42 --device auto
-
-# Ablation 3: Fixed heuristic computation offloading (no learned offloading)
-python train.py --model ablation --ablation fixed_offload --episodes 1000 --seed 42 --device auto
-```
-
----
-
-### Step 9: Multi-Seed Benchmark Evaluation Across 5 Seeds
-*Evaluates all 12 algorithms deterministically across 5 held-out evaluation seeds (101, 102, 103, 104, 105).*
-```bash
-source .venv/bin/activate
 python evaluate.py --num_seeds 5 --strict_ckpts --device auto
 ```
 * **Output CSVs Generated in `results/`:**
   * `benchmark_summary.csv` (Means ± standard deviations)
   * `benchmark_detailed.csv` (Per-seed metrics)
-  * `offloading_distribution.csv` (Local vs. Edge vs. Miss breakdown)
+  * `offloading_distribution.csv` (Local vs. Peer vs. Edge breakdown)
   * `raw_evaluation_trajectories.csv` (Full waypoint traces)
 
 ---
 
-### Step 10: Generate All-Model Publication Plots & Wide Curves (300 DPI)
-*Renders high-resolution figures displaying **ALL trained models** with $w=30$ rolling smoothing, four-border frame, and dashed grid.*
+### Step 9: Generate Publication Figures (Per-Episode Resolution, 300 DPI)
+*Renders high-resolution figures displaying **ALL trained models** at per-episode resolution without blur or smoothing:*
 ```bash
-source .venv/bin/activate
-python generate_publication_plots.py --res_dir results --fig_dir results/publication_figures_v3 --dpi 300
+python generate_publication_plots.py --res_dir results --fig_dir results/publication_figures_v3 --per_episode --dpi 300
 ```
 
-* **Plots Generated in `results/publication_figures_v3/`:**
-  * `fig_task_completion_rate_wide.png` (**ALL MODELS**: Pure MAPPO, Residual MAPPO, IPPO, MADDPG, CPPO)
-  * `fig_task_completion_rate_pure_vs_ippo.png` (Pairwise: Pure MAPPO vs. IPPO)
-  * `fig_episode_return_wide.png` (**ALL MODELS**: Cumulative returns, $w=30$)
-  * `fig_episode_return_pure_vs_ippo.png` (Pairwise: Pure MAPPO vs. IPPO return)
-  * `fig_fleet_energy_wide.png` (**ALL MODELS**: Total fleet mechanical & comm energy in kJ)
-  * `fig_safety_interventions_wide.png` (**ALL MODELS**: Safety filter interventions)
-  * `fig_arrival_rate_wide.png` (**ALL MODELS**: UAV arrival rate %)
-  * `fig06_benchmark_table.png` (Publication comparison table)
-  * `fig08_offloading_distribution.png` (Stacked offloading distribution)
-  * `fig09_pareto_front.png` (Latency vs. Energy Pareto frontier)
-  * `fig10_aerodynamic_power.png` (Rotary-wing power curve)
+* **Generated in `results/publication_figures_v3/`:**
+  * `fig01_training_return.png` (Training return vs. episode)
+  * `fig02_training_rates.png` (Task completion & arrival rate vs. episode)
+  * `fig03_training_energy_safety.png` (Fleet mechanical energy & safety interventions)
+  * `fig04_validation_curves.png` (Held-out validation return, task completion, and arrival rate)
+  * `fig06_benchmark_table.png` (Publication comparison table with all MARL and classical baselines)
+  * `fig07_navigation_benchmark.png` (3D navigation speed, path length, and docking accuracy)
+  * `fig08_offloading_distribution.png` (Stacked offloading distribution breakdown)
+  * `fig09_pareto_front.png` (Latency vs. Energy Pareto trade-off curve)
+  * `fig10_aerodynamic_power.png` (Rotary-wing aerodynamic power curve)
+  * `fig12_per_seed_variability.png` (Multi-seed boxplot distributions)
+  * `fig13_multiseed_ci.png` (Confidence interval bands)
+  * Wide-format publication curves: `fig_task_completion_rate_wide.png`, `fig_episode_return_wide.png`, `fig_fleet_energy_wide.png`, `fig_arrival_rate_wide.png`, `fig_safety_interventions_wide.png`
 
 ---
 
-### Step 11: Sync Results to `research_paper/`
-```bash
-source .venv/bin/activate
-mkdir -p research_paper/tables research_paper/figures
-cp results/*.csv research_paper/tables/
-cp results/publication_figures_v3/*.png research_paper/figures/
-
-# Enable \includegraphics in LaTeX manuscript
-python -c '
-import re
-tex_path = "research_paper/manuscript/research_paper.tex"
-with open(tex_path, "r") as f:
-    c = f.read()
-c = c.replace("% \\includegraphics", "\\includegraphics")
-c = re.sub(r"\\fbox\{\\parbox\{.*?\}\}", "", c, flags=re.DOTALL)
-with open(tex_path, "w") as f:
-    f.write(c)
-print("[DONE] Enabled figures in research_paper/manuscript/research_paper.tex")
-'
-```
+### Step 10: Sync Results to LaTeX Manuscript
+* **macOS / Linux:**
+  ```bash
+  mkdir -p research_paper/tables research_paper/figures
+  cp results/*.csv research_paper/tables/
+  cp results/publication_figures_v3/*.png research_paper/figures/
+  ```
+* **Windows PowerShell:**
+  ```powershell
+  New-Item -ItemType Directory -Force -Path "research_paper/tables", "research_paper/figures" | Out-Null
+  Copy-Item results/*.csv -Destination research_paper/tables/ -Force
+  Copy-Item results/publication_figures_v3/*.png -Destination research_paper/figures/ -Force
+  ```
 
 ---
 
 ## 🔍 Verification & Sanity Check
 
-Run this verification snippet to check that all models, 1000-episode logs, and publication plots exist and have non-zero file sizes:
+Run this cross-platform Python snippet to verify that all checkpoints, 1000-episode logs, and publication figures exist and are non-empty:
 
 ```bash
 python -c "
@@ -269,7 +260,7 @@ for f in sorted(glob.glob('results/training_logs_*.csv')):
     print(f'  {os.path.basename(f)}: {lines} episodes')
 
 print('\n=== ALL PUBLICATION FIGURES ===')
-for f in sorted(glob.glob('research_paper/figures/*.png')):
+for f in sorted(glob.glob('results/publication_figures_v3/*.png')):
     print(f'  {os.path.basename(f)} ({os.path.getsize(f)/1024:.1f} KB)')
 "
 ```

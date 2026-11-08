@@ -79,7 +79,13 @@ class CentralizedActorNetwork(nn.Module):
         offload_h = self.offload_backbone(offload_feat)
 
         raw_move = self.move_mean_head(nav_h).view(-1, self.num_uavs, 3)
-        move_mean = torch.tanh(raw_move) * self.max_disp
+        if state.shape[-1] == 52:
+            d_list = [state[..., j * 13 + 9: j * 13 + 10] * 200.0 for j in range(self.num_uavs)]
+            d_all = torch.stack(d_list, dim=-2)
+            allowed = torch.clamp(d_all * 0.8, 0.3, self.max_disp)
+            move_mean = torch.tanh(raw_move) * allowed
+        else:
+            move_mean = torch.tanh(raw_move) * self.max_disp
         move_std = torch.exp(torch.clamp(self.move_log_std, -2.0, 0.5)).view(-1, self.num_uavs, 3)
 
         logits_list = [head(offload_h).unsqueeze(1) for head in self.offload_heads]

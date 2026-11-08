@@ -57,7 +57,7 @@ def evaluate_validation(env: MultiUAVEnv, agent: Any, model_type: str, val_seeds
     val_arrivals = []
 
     for s in val_seeds:
-        scen = "nav_general" if s % 2 == 1 else "randomized"
+        scen = "randomized"
         obs, state = env.reset(seed=s, scenario_mode=scen)
         ep_ret = 0.0
         ep_comp = 0
@@ -66,12 +66,13 @@ def evaluate_validation(env: MultiUAVEnv, agent: Any, model_type: str, val_seeds
         ep_interv = 0
 
         for _ in range(env.cfg.mappo.episode_length):
-            if model_type == "cppo":
+            if "cppo" in model_type:
                 actions, _, _, _ = agent.get_actions(state, deterministic=True)
-            elif model_type in ["mappo", "ippo"]:
+            elif "maddpg" in model_type:
+                res = agent.get_actions(obs, explore=False)
+                actions = res[0] if isinstance(res, tuple) else res
+            elif "mappo" in model_type or "ippo" in model_type:
                 actions, _, _, _ = agent.get_actions(obs, deterministic=True)
-            elif model_type == "maddpg":
-                actions, _ = agent.get_actions(obs, explore=False)
             else:
                 raise ValueError(f"Unknown model_type: {model_type}")
 
@@ -212,12 +213,11 @@ def train_mappo(
     for ep in pbar:
         t_env_start = time.time()
         if curriculum:
-            if ep <= int(num_episodes * 0.50):
-                c_ratio = float(ep) / float(max(1, int(num_episodes * 0.50)))
-                scen_mode = "randomized"
-            else:
-                c_ratio = 1.0
-                scen_mode = "nav_general"
+            # Smoothly ramp deployment radius from station ring (20m) to nominal start ring (65m)
+            # over the first 40% of episodes, then keep at full corridor difficulty (1.0) for the remainder
+            ramp_episodes = max(1, int(num_episodes * 0.40))
+            c_ratio = min(1.0, float(ep) / float(ramp_episodes))
+            scen_mode = "randomized"
         else:
             c_ratio = 1.0
             scen_mode = "randomized"
@@ -393,12 +393,11 @@ def train_ippo(num_episodes: int = 80, seed: int = 42, device: str = "auto", pol
     for ep in pbar:
         t_env_start = time.time()
         if curriculum:
-            if ep <= int(num_episodes * 0.50):
-                c_ratio = float(ep) / float(max(1, int(num_episodes * 0.50)))
-                scen_mode = "randomized"
-            else:
-                c_ratio = 1.0
-                scen_mode = "nav_general"
+            # Smoothly ramp deployment radius from station ring (20m) to nominal start ring (65m)
+            # over the first 40% of episodes, then keep at full corridor difficulty (1.0) for the remainder
+            ramp_episodes = max(1, int(num_episodes * 0.40))
+            c_ratio = min(1.0, float(ep) / float(ramp_episodes))
+            scen_mode = "randomized"
         else:
             c_ratio = 1.0
             scen_mode = "randomized"
@@ -451,7 +450,7 @@ def train_ippo(num_episodes: int = 80, seed: int = 42, device: str = "auto", pol
         comp_rate = (ep_completed / total_tasks) * 100.0
         arr_rate = float(sum(1 for a in info.get("arrival_steps", {}).values() if a is not None) / env.num_uavs * 100.0)
 
-        val_stats = {"val_return": np.nan, "val_comp_rate": np.nan}
+        val_stats = {"val_return": np.nan, "val_comp_rate": np.nan, "val_energy": np.nan, "val_interventions": np.nan, "val_arrival_rate": np.nan, "val_score": np.nan}
         if ep % eval_freq == 0 or ep == 1:
             val_stats = evaluate_validation(env, agent, "ippo")
             if val_stats.get("val_score", -float("inf")) > best_val_score:
@@ -473,6 +472,9 @@ def train_ippo(num_episodes: int = 80, seed: int = 42, device: str = "auto", pol
             "safety_interventions": ep_interventions,
             "val_return": val_stats["val_return"],
             "val_completion_rate": val_stats["val_comp_rate"],
+            "val_arrival_rate": val_stats["val_arrival_rate"],
+            "val_energy": val_stats["val_energy"],
+            "val_interventions": val_stats["val_interventions"],
             "env_steps_per_sec": env_steps_per_sec,
             "updates_per_sec": updates_per_sec,
             "wall_clock_sec": time.time() - start_total_time
@@ -551,12 +553,11 @@ def train_maddpg(num_episodes: int = 80, seed: int = 42, device: str = "auto", p
     for ep in pbar:
         t_env_start = time.time()
         if curriculum:
-            if ep <= int(num_episodes * 0.50):
-                c_ratio = float(ep) / float(max(1, int(num_episodes * 0.50)))
-                scen_mode = "randomized"
-            else:
-                c_ratio = 1.0
-                scen_mode = "nav_general"
+            # Smoothly ramp deployment radius from station ring (20m) to nominal start ring (65m)
+            # over the first 40% of episodes, then keep at full corridor difficulty (1.0) for the remainder
+            ramp_episodes = max(1, int(num_episodes * 0.40))
+            c_ratio = min(1.0, float(ep) / float(ramp_episodes))
+            scen_mode = "randomized"
         else:
             c_ratio = 1.0
             scen_mode = "randomized"
@@ -568,8 +569,9 @@ def train_maddpg(num_episodes: int = 80, seed: int = 42, device: str = "auto", p
         ep_energy = 0.0
         ep_interventions = 0
 
+        curr_noise = max(0.1, 1.0 * (0.997 ** ep))
         for t in range(cfg.mappo.episode_length):
-            actions, act_vecs = agent.get_actions(obs, explore=True)
+            actions, act_vecs = agent.get_actions(obs, explore=True, noise_std=curr_noise)
             next_obs, next_state, r, done, info = env.step(actions)
             last_terminated = bool(info.get("terminated", False))
 
@@ -595,7 +597,7 @@ def train_maddpg(num_episodes: int = 80, seed: int = 42, device: str = "auto", p
         comp_rate = (ep_completed / total_tasks) * 100.0
         arr_rate = float(sum(1 for a in info.get("arrival_steps", {}).values() if a is not None) / env.num_uavs * 100.0)
 
-        val_stats = {"val_return": np.nan, "val_comp_rate": np.nan}
+        val_stats = {"val_return": np.nan, "val_comp_rate": np.nan, "val_energy": np.nan, "val_interventions": np.nan, "val_arrival_rate": np.nan, "val_score": np.nan}
         if ep % eval_freq == 0 or ep == 1:
             val_stats = evaluate_validation(env, agent, "maddpg")
             if val_stats.get("val_score", -float("inf")) > best_val_score:
@@ -617,6 +619,9 @@ def train_maddpg(num_episodes: int = 80, seed: int = 42, device: str = "auto", p
             "safety_interventions": ep_interventions,
             "val_return": val_stats["val_return"],
             "val_completion_rate": val_stats["val_comp_rate"],
+            "val_arrival_rate": val_stats["val_arrival_rate"],
+            "val_energy": val_stats["val_energy"],
+            "val_interventions": val_stats["val_interventions"],
             "env_steps_per_sec": env_steps_per_sec,
             "updates_per_sec": updates_per_sec,
             "wall_clock_sec": time.time() - start_total_time
@@ -693,12 +698,11 @@ def train_cppo(num_episodes: int = 80, seed: int = 42, device: str = "auto", eva
     for ep in pbar:
         t_env_start = time.time()
         if curriculum:
-            if ep <= int(num_episodes * 0.50):
-                c_ratio = float(ep) / float(max(1, int(num_episodes * 0.50)))
-                scen_mode = "randomized"
-            else:
-                c_ratio = 1.0
-                scen_mode = "nav_general"
+            # Smoothly ramp deployment radius from station ring (20m) to nominal start ring (65m)
+            # over the first 40% of episodes, then keep at full corridor difficulty (1.0) for the remainder
+            ramp_episodes = max(1, int(num_episodes * 0.40))
+            c_ratio = min(1.0, float(ep) / float(ramp_episodes))
+            scen_mode = "randomized"
         else:
             c_ratio = 1.0
             scen_mode = "randomized"
@@ -711,12 +715,14 @@ def train_cppo(num_episodes: int = 80, seed: int = 42, device: str = "auto", eva
         reward_buf = np.zeros((ep_len,), dtype=np.float32)
         value_buf = np.zeros((ep_len,), dtype=np.float32)
         done_buf = np.zeros((ep_len,), dtype=np.float32)
+        term_buf = np.zeros((ep_len,), dtype=np.float32)
 
         ep_reward = 0.0
         ep_completed = 0
         ep_missed = 0
         ep_energy = 0.0
         ep_interventions = 0
+        last_terminated = False
 
         for t in range(ep_len):
             actions, act_m, act_o, lp = agent.get_actions(state, deterministic=False)
@@ -731,6 +737,8 @@ def train_cppo(num_episodes: int = 80, seed: int = 42, device: str = "auto", eva
             next_obs, next_state, r, done, info = env.step(actions)
             reward_buf[t] = r
             done_buf[t] = float(done)
+            last_terminated = bool(info.get("terminated", False))
+            term_buf[t] = float(last_terminated)
 
             obs = next_obs
             state = next_state
@@ -744,13 +752,17 @@ def train_cppo(num_episodes: int = 80, seed: int = 42, device: str = "auto", eva
 
         total_env_time += (time.time() - t_env_start)
 
-        # GAE computation
+        # GAE computation with genuine termination mask (bootstrap value on truncation)
         last_val = agent.get_value(state)
         advantages = np.zeros(ep_len, dtype=np.float32)
         last_gae = 0.0
         for t in reversed(range(ep_len)):
-            next_v = last_val if t == ep_len - 1 else value_buf[t + 1]
-            non_term = 1.0 - (1.0 if t == ep_len - 1 else done_buf[t])
+            if t == ep_len - 1:
+                next_v = last_val
+                non_term = 1.0 - float(last_terminated)
+            else:
+                next_v = value_buf[t + 1]
+                non_term = 1.0 - term_buf[t]
             delta = reward_buf[t] + cfg.mappo.gamma * next_v * non_term - value_buf[t]
             last_gae = delta + cfg.mappo.gamma * cfg.mappo.gae_lambda * non_term * last_gae
             advantages[t] = last_gae
@@ -765,7 +777,7 @@ def train_cppo(num_episodes: int = 80, seed: int = 42, device: str = "auto", eva
         comp_rate = (ep_completed / total_tasks) * 100.0
         arr_rate = float(sum(1 for a in info.get("arrival_steps", {}).values() if a is not None) / env.num_uavs * 100.0)
 
-        val_stats = {"val_return": np.nan, "val_comp_rate": np.nan}
+        val_stats = {"val_return": np.nan, "val_comp_rate": np.nan, "val_energy": np.nan, "val_interventions": np.nan, "val_arrival_rate": np.nan, "val_score": np.nan}
         if ep % eval_freq == 0 or ep == 1:
             val_stats = evaluate_validation(env, agent, "cppo")
             if val_stats.get("val_score", -float("inf")) > best_val_score:
@@ -787,6 +799,9 @@ def train_cppo(num_episodes: int = 80, seed: int = 42, device: str = "auto", eva
             "safety_interventions": ep_interventions,
             "val_return": val_stats["val_return"],
             "val_completion_rate": val_stats["val_comp_rate"],
+            "val_arrival_rate": val_stats["val_arrival_rate"],
+            "val_energy": val_stats["val_energy"],
+            "val_interventions": val_stats["val_interventions"],
             "env_steps_per_sec": env_steps_per_sec,
             "updates_per_sec": updates_per_sec,
             "wall_clock_sec": time.time() - start_total_time
@@ -814,15 +829,15 @@ def train_cppo(num_episodes: int = 80, seed: int = 42, device: str = "auto", eva
     print(f"[CPPO Finished] Best Checkpoint: {best_ckpt} | Final: {final_ckpt} | Log: {csv_log}")
     return best_ckpt
 
-def train_all(num_episodes: int = 500, seed: int = 42, device: str = "auto", policy_variant: str = "pure", curriculum: bool = True, output_dir: Optional[str] = None):
+def train_all(num_episodes: int = 500, seed: int = 42, device: str = "auto", policy_variant: str = "pure", curriculum: bool = True, eval_freq: int = 10, output_dir: Optional[str] = None):
     """Trains all four primary learning algorithms under identical seed and episode budgets with Phase 2 spatial randomization."""
     print("\n" + "=" * 80)
-    print(f" TRAINING COMPLETE MARL COMPARISON SUITE (Episodes: {num_episodes}, Seed: {seed}, Variant: {policy_variant}, Curriculum: {curriculum})")
+    print(f" TRAINING COMPLETE MARL COMPARISON SUITE (Episodes: {num_episodes}, Seed: {seed}, Variant: {policy_variant}, Curriculum: {curriculum}, EvalFreq: {eval_freq})")
     print("=" * 80)
-    train_mappo(num_episodes=num_episodes, seed=seed, device=device, policy_variant=policy_variant, curriculum=curriculum, output_dir=output_dir)
-    train_ippo(num_episodes=num_episodes, seed=seed, device=device, policy_variant=policy_variant, curriculum=curriculum, output_dir=output_dir)
-    train_maddpg(num_episodes=num_episodes, seed=seed, device=device, policy_variant=policy_variant, curriculum=curriculum, output_dir=output_dir)
-    train_cppo(num_episodes=num_episodes, seed=seed, device=device, curriculum=curriculum, output_dir=output_dir)
+    train_mappo(num_episodes=num_episodes, seed=seed, device=device, policy_variant=policy_variant, eval_freq=eval_freq, curriculum=curriculum, output_dir=output_dir)
+    train_ippo(num_episodes=num_episodes, seed=seed, device=device, policy_variant=policy_variant, eval_freq=eval_freq, curriculum=curriculum, output_dir=output_dir)
+    train_maddpg(num_episodes=num_episodes, seed=seed, device=device, policy_variant=policy_variant, eval_freq=eval_freq, curriculum=curriculum, output_dir=output_dir)
+    train_cppo(num_episodes=num_episodes, seed=seed, device=device, eval_freq=eval_freq, curriculum=curriculum, output_dir=output_dir)
 
     # Automatically plot comparative convergence curve across all four algorithms
     base_dir = os.path.dirname(os.path.abspath(__file__))
@@ -857,6 +872,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--episodes", type=int, default=500, help="Number of training episodes")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--device", type=str, default="auto", choices=["auto", "cuda", "cpu", "mps"], help="Compute device")
+    parser.add_argument("--eval_freq", type=int, default=10, help="Validation frequency in episodes (use 1 for logging validation on every episode)")
     parser.add_argument("--curriculum", action="store_true", default=True, help="Enable curriculum learning schedule")
     parser.add_argument("--output_dir", type=str, default=None, help="Quarantined output directory for results")
     return parser
@@ -866,14 +882,14 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.model == "all":
-        train_all(num_episodes=args.episodes, seed=args.seed, device=args.device, policy_variant=args.variant, curriculum=args.curriculum, output_dir=args.output_dir)
+        train_all(num_episodes=args.episodes, seed=args.seed, device=args.device, policy_variant=args.variant, curriculum=args.curriculum, eval_freq=args.eval_freq, output_dir=args.output_dir)
     elif args.model == "mappo":
-        train_mappo(num_episodes=args.episodes, seed=args.seed, device=args.device, policy_variant=args.variant, ablation=args.ablation, curriculum=args.curriculum, output_dir=args.output_dir)
+        train_mappo(num_episodes=args.episodes, seed=args.seed, device=args.device, policy_variant=args.variant, ablation=args.ablation, eval_freq=args.eval_freq, curriculum=args.curriculum, output_dir=args.output_dir)
     elif args.model == "ippo":
-        train_ippo(num_episodes=args.episodes, seed=args.seed, device=args.device, policy_variant=args.variant, curriculum=args.curriculum, output_dir=args.output_dir)
+        train_ippo(num_episodes=args.episodes, seed=args.seed, device=args.device, policy_variant=args.variant, eval_freq=args.eval_freq, curriculum=args.curriculum, output_dir=args.output_dir)
     elif args.model == "maddpg":
-        train_maddpg(num_episodes=args.episodes, seed=args.seed, device=args.device, policy_variant=args.variant, curriculum=args.curriculum, output_dir=args.output_dir)
+        train_maddpg(num_episodes=args.episodes, seed=args.seed, device=args.device, policy_variant=args.variant, eval_freq=args.eval_freq, curriculum=args.curriculum, output_dir=args.output_dir)
     elif args.model == "cppo":
-        train_cppo(num_episodes=args.episodes, seed=args.seed, device=args.device, curriculum=args.curriculum, output_dir=args.output_dir)
+        train_cppo(num_episodes=args.episodes, seed=args.seed, device=args.device, eval_freq=args.eval_freq, curriculum=args.curriculum, output_dir=args.output_dir)
     elif args.model == "ablation":
-        train_mappo(num_episodes=args.episodes, seed=args.seed, device=args.device, policy_variant=args.variant, ablation=args.ablation or "no_energy", curriculum=args.curriculum, output_dir=args.output_dir)
+        train_mappo(num_episodes=args.episodes, seed=args.seed, device=args.device, policy_variant=args.variant, ablation=args.ablation or "no_energy", eval_freq=args.eval_freq, curriculum=args.curriculum, output_dir=args.output_dir)

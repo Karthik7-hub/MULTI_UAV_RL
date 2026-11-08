@@ -209,7 +209,7 @@ def parse_mean_std(col):
 # ===========================================================================
 # FIGURE 1 — Training Convergence: Return vs Episode (all algorithms)
 # ===========================================================================
-def fig_training_return(dfs: dict, fig_dir: str):
+def fig_training_return(dfs: dict, fig_dir: str, window: int = 20):
     print("[Fig 1] Training Return vs Episode …")
     fig, ax = plt.subplots(figsize=(9, 5))
 
@@ -218,17 +218,18 @@ def fig_training_return(dfs: dict, fig_dir: str):
             continue
         ep = df["episode"].values
         raw = df["return"].values
-        sm  = smooth(raw, window=20)
+        sm  = smooth(raw, window=window) if window > 1 else raw
         col = PALETTE.get(key, "#555555")
         ls  = LINESTYLES.get(key, "-")
         lab = DISPLAY_NAMES.get(key, key.upper())
-        ax.plot(ep, sm, color=col, linestyle=ls, linewidth=2.0, label=lab, zorder=3)
-        # Light raw curve behind
-        ax.plot(ep, raw, color=col, linestyle=ls, linewidth=0.5, alpha=0.25, zorder=2)
+        ax.plot(ep, sm, color=col, linestyle=ls, linewidth=1.6 if window <= 1 else 2.0, label=lab, zorder=3)
+        if window > 1:
+            # Light raw curve behind
+            ax.plot(ep, raw, color=col, linestyle=ls, linewidth=0.5, alpha=0.25, zorder=2)
 
     ax.axhline(0, color="#aaaaaa", linewidth=0.8, linestyle=":")
     ax.set_xlabel("Training Episode")
-    ax.set_ylabel("Episode Return (smoothed)")
+    ax.set_ylabel("Episode Return" + (" (per episode)" if window <= 1 else " (smoothed)"))
     ax.set_title("Fig 1 · Training Convergence — Episode Return")
     ax.legend(loc="lower right", ncol=2)
     ax.grid(True)
@@ -239,7 +240,7 @@ def fig_training_return(dfs: dict, fig_dir: str):
 # ===========================================================================
 # FIGURE 2 — Completion Rate & Arrival Rate vs Episode
 # ===========================================================================
-def fig_training_rates(dfs: dict, fig_dir: str):
+def fig_training_rates(dfs: dict, fig_dir: str, window: int = 20):
     print("[Fig 2] Training Completion/Arrival Rate vs Episode …")
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
     metric_pairs = [
@@ -253,12 +254,13 @@ def fig_training_rates(dfs: dict, fig_dir: str):
                 continue
             ep  = df["episode"].values
             raw = df[col_name].values
-            sm  = smooth(raw, window=20)
+            sm  = smooth(raw, window=window) if window > 1 else raw
             c   = PALETTE.get(key, "#555555")
             ls  = LINESTYLES.get(key, "-")
-            ax.plot(ep, sm, color=c, linestyle=ls, linewidth=2.0,
+            ax.plot(ep, sm, color=c, linestyle=ls, linewidth=1.6 if window <= 1 else 2.0,
                     label=DISPLAY_NAMES.get(key, key.upper()), zorder=3)
-            ax.plot(ep, raw, color=c, linestyle=ls, linewidth=0.4, alpha=0.2)
+            if window > 1:
+                ax.plot(ep, raw, color=c, linestyle=ls, linewidth=0.4, alpha=0.2)
 
         ax.set_xlabel("Training Episode")
         ax.set_ylabel(ylabel)
@@ -346,19 +348,23 @@ def plot_wide_publication_curve(
         if metric_col == "total_energy":
             raw = raw / 1000.0  # Convert to kJ
         
-        w = min(window, max(3, len(raw) // 10))
-        smooth_val = pd.Series(raw).rolling(window=w, min_periods=1).mean().values
-        
         c = PALETTE.get(k, "#0284c7")
         ls = LINESTYLES.get(k, "-")
         lab = DISPLAY_NAMES.get(k, k)
 
-        # Raw trace (faint background)
-        ax.plot(ep, raw, color=c, linestyle=ls, linewidth=0.65, alpha=0.18, zorder=2)
-        # Smoothed line (bold foreground)
-        ax.plot(ep, smooth_val, color=c, linestyle=ls, linewidth=2.3, label=lab, zorder=3)
+        if window <= 1:
+            smooth_val = raw
+            ax.plot(ep, raw, color=c, linestyle=ls, linewidth=1.5, label=lab, zorder=3)
+        else:
+            w = min(window, max(3, len(raw) // 10))
+            smooth_val = pd.Series(raw).rolling(window=w, min_periods=1).mean().values
+            # Raw trace (faint background)
+            ax.plot(ep, raw, color=c, linestyle=ls, linewidth=0.65, alpha=0.18, zorder=2)
+            # Smoothed line (bold foreground)
+            ax.plot(ep, smooth_val, color=c, linestyle=ls, linewidth=2.3, label=lab, zorder=3)
 
-    title_text = f"{ep_prefix} Training: {title_suffix}"
+    suffix_label = title_suffix if window > 1 else title_suffix.replace("(smoothed w=30)", "(Per-Episode)")
+    title_text = f"{ep_prefix} Training: {suffix_label}"
     ax.set_title(title_text, fontsize=13, pad=10, fontfamily="sans-serif")
     ax.set_xlabel("Training Episode", fontsize=11, fontfamily="sans-serif")
     ax.set_ylabel(ylabel, fontsize=11, fontfamily="sans-serif")
@@ -376,7 +382,7 @@ def plot_wide_publication_curve(
     plt.close(fig)
 
 
-def fig_clean_wide_suite(dfs: dict, fig_dir: str):
+def fig_clean_wide_suite(dfs: dict, fig_dir: str, window: int = 30):
     """Generates the full suite of wide-format single-panel publication figures with ALL models."""
     print("[Wide Figures] Generating wide-format publication curves for ALL MARL models …")
     
@@ -395,7 +401,7 @@ def fig_clean_wide_suite(dfs: dict, fig_dir: str):
         target_algorithms=all_marl_keys,
         ylim=(55, 101),
         y_step=10,
-        window=30,
+        window=window,
     )
     
     # 1b. Task Completion Rate (Pure MAPPO vs IPPO pairwise comparison)
@@ -410,7 +416,7 @@ def fig_clean_wide_suite(dfs: dict, fig_dir: str):
         target_algorithms=["mappo_pure", "ippo"],
         ylim=(55, 101),
         y_step=10,
-        window=30,
+        window=window,
     )
 
     # 2. Episode Return (ALL MARL Models)
@@ -424,7 +430,7 @@ def fig_clean_wide_suite(dfs: dict, fig_dir: str):
         legend_loc="upper right",
         target_algorithms=all_marl_keys,
         y_step=250,
-        window=30,
+        window=window,
     )
 
     # 2b. Episode Return (Pure MAPPO vs IPPO pairwise comparison)
@@ -438,7 +444,7 @@ def fig_clean_wide_suite(dfs: dict, fig_dir: str):
         legend_loc="upper right",
         target_algorithms=["mappo_pure", "ippo"],
         y_step=250,
-        window=30,
+        window=window,
     )
 
     # 3. Fleet Energy (ALL MARL Models)
@@ -451,7 +457,7 @@ def fig_clean_wide_suite(dfs: dict, fig_dir: str):
         out_path=p_ene,
         legend_loc="upper right",
         target_algorithms=all_marl_keys,
-        window=30,
+        window=window,
     )
 
     # 4. Safety Interventions (ALL MARL Models)
@@ -464,7 +470,7 @@ def fig_clean_wide_suite(dfs: dict, fig_dir: str):
         out_path=p_safe,
         legend_loc="upper right",
         target_algorithms=all_marl_keys,
-        window=30,
+        window=window,
     )
 
     # 5. UAV Navigation Arrival Rate (ALL MARL Models)
@@ -479,14 +485,14 @@ def fig_clean_wide_suite(dfs: dict, fig_dir: str):
         target_algorithms=all_marl_keys,
         ylim=(-2, 105),
         y_step=20,
-        window=30,
+        window=window,
     )
 
 
 # ===========================================================================
 # FIGURE 3 — Training Energy & Safety Interventions
 # ===========================================================================
-def fig_training_energy_safety(dfs: dict, fig_dir: str):
+def fig_training_energy_safety(dfs: dict, fig_dir: str, window: int = 20):
     print("[Fig 3] Training Energy & Safety Interventions …")
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 
@@ -497,12 +503,18 @@ def fig_training_energy_safety(dfs: dict, fig_dir: str):
         ep = df["episode"].values
 
         if "total_energy" in df.columns:
-            sm = smooth(df["total_energy"].values / 1000.0, window=20)
-            axes[0].plot(ep, sm, color=c, linestyle=ls, linewidth=2.0, label=lab)
+            raw_e = df["total_energy"].values / 1000.0
+            sm = smooth(raw_e, window=window) if window > 1 else raw_e
+            axes[0].plot(ep, sm, color=c, linestyle=ls, linewidth=1.6 if window <= 1 else 2.0, label=lab)
+            if window > 1:
+                axes[0].plot(ep, raw_e, color=c, linestyle=ls, linewidth=0.4, alpha=0.2)
 
         if "safety_interventions" in df.columns:
-            sm2 = smooth(df["safety_interventions"].values.astype(float), window=20)
-            axes[1].plot(ep, sm2, color=c, linestyle=ls, linewidth=2.0, label=lab)
+            raw_s = df["safety_interventions"].values.astype(float)
+            sm2 = smooth(raw_s, window=window) if window > 1 else raw_s
+            axes[1].plot(ep, sm2, color=c, linestyle=ls, linewidth=1.6 if window <= 1 else 2.0, label=lab)
+            if window > 1:
+                axes[1].plot(ep, raw_s, color=c, linestyle=ls, linewidth=0.4, alpha=0.2)
 
     axes[0].set_xlabel("Training Episode")
     axes[0].set_ylabel("Total Energy per Episode (kJ)")
@@ -524,7 +536,7 @@ def fig_training_energy_safety(dfs: dict, fig_dir: str):
 # ===========================================================================
 # FIGURE 4 — Validation Curves (from training logs)
 # ===========================================================================
-def fig_validation_curves(dfs: dict, fig_dir: str):
+def fig_validation_curves(dfs: dict, fig_dir: str, window: int = 10):
     print("[Fig 4] Validation Curves …")
     has_val = {k: df for k, df in dfs.items() if "val_return" in df.columns
                and df["val_return"].notna().any()}
@@ -548,10 +560,11 @@ def fig_validation_curves(dfs: dict, fig_dir: str):
             raw  = df[col_name].values[mask].astype(float)
             if len(raw) < 2:
                 continue
-            sm = smooth(raw, window=10)
+            sm = smooth(raw, window=window) if window > 1 else raw
             c  = PALETTE.get(key, "#555555")
             ls = LINESTYLES.get(key, "-")
-            ax.plot(ep, sm, color=c, linestyle=ls, linewidth=2.0,
+            ax.plot(ep, sm, color=c, linestyle=ls, linewidth=1.6 if window <= 1 else 2.0,
+                    marker="o" if len(ep) <= 100 else None, markersize=3.5,
                     label=DISPLAY_NAMES.get(key, key.upper()))
         ax.set_xlabel("Training Episode")
         ax.set_ylabel(ylabel)
@@ -570,7 +583,7 @@ def fig_validation_curves(dfs: dict, fig_dir: str):
 # ===========================================================================
 # FIGURE 5 — Reward Component Decomposition (MAPPO Pure)
 # ===========================================================================
-def fig_reward_decomposition(dfs: dict, fig_dir: str):
+def fig_reward_decomposition(dfs: dict, fig_dir: str, window: int = 20):
     print("[Fig 5] Reward Component Decomposition …")
     if "mappo_pure" not in dfs:
         print("  [skip] mappo_pure not found.")
@@ -594,15 +607,18 @@ def fig_reward_decomposition(dfs: dict, fig_dir: str):
     fig, ax = plt.subplots(figsize=(11, 5))
     ep = df["episode"].values
     for col, lbl, color in present:
-        sm = smooth(df[col].values.astype(float), window=20)
-        ax.plot(ep, sm, color=color, linewidth=1.8, label=lbl)
+        raw_r = df[col].values.astype(float)
+        sm = smooth(raw_r, window=window) if window > 1 else raw_r
+        ax.plot(ep, sm, color=color, linewidth=1.4 if window <= 1 else 1.8, label=lbl)
 
     ax.axhline(0, color="#aaaaaa", linewidth=0.7, linestyle=":")
     ax.set_xlabel("Training Episode")
-    ax.set_ylabel("Reward Component (smoothed)")
+    ax.set_ylabel("Reward Component" + (" (per episode)" if window <= 1 else " (smoothed)"))
     ax.set_title("Fig 5 · Reward Component Decomposition — Pure MAPPO")
     ax.legend(ncol=4, loc="upper left")
     ax.grid(True)
+    save(fig, os.path.join(fig_dir, "fig05_reward_decomposition.png"))
+    plt.close(fig)
     save(fig, os.path.join(fig_dir, "fig05_reward_decomposition.png"))
     plt.close(fig)
 
@@ -1164,14 +1180,20 @@ def main():
     parser.add_argument("--res_dir", type=str,
                         default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "results"),
                         help="Results directory (default: ./results)")
-    parser.add_argument("--out_dir", type=str, default=None,
+    parser.add_argument("--out_dir", "--fig_dir", type=str, default=None, dest="out_dir",
                         help="Output figures directory (default: results/publication_figures_v3)")
     parser.add_argument("--dpi", type=int, default=300, help="Figure DPI (default: 300)")
+    parser.add_argument("--per_episode", action="store_true", default=False,
+                        help="Plot every single episode without rolling-average smoothing")
+    parser.add_argument("--window", type=int, default=None,
+                        help="Rolling window size for curve smoothing (default: 30, use 1 for raw per-episode)")
     args = parser.parse_args()
 
     res_dir = args.res_dir
     fig_dir = args.out_dir or os.path.join(res_dir, "publication_figures_v3")
     os.makedirs(fig_dir, exist_ok=True)
+
+    plot_window = 1 if args.per_episode else (args.window if args.window is not None else 30)
 
     # Apply publication style
     set_pub_style()
@@ -1181,6 +1203,7 @@ def main():
     print(" GENERATING PUBLISHING-READY FIGURES")
     print(f" Results dir : {res_dir}")
     print(f" Output dir  : {fig_dir}")
+    print(f" Window size : {plot_window} {'(Per-Episode raw curves)' if plot_window <= 1 else '(Smoothed)'}")
     print(f"{'='*70}\n")
 
     # Load training logs
@@ -1188,12 +1211,12 @@ def main():
 
     # Generate figures
     if dfs:
-        fig_training_return(dfs, fig_dir)
-        fig_training_rates(dfs, fig_dir)
-        fig_clean_wide_suite(dfs, fig_dir)
-        fig_training_energy_safety(dfs, fig_dir)
-        fig_validation_curves(dfs, fig_dir)
-        fig_reward_decomposition(dfs, fig_dir)
+        fig_training_return(dfs, fig_dir, window=plot_window)
+        fig_training_rates(dfs, fig_dir, window=plot_window)
+        fig_clean_wide_suite(dfs, fig_dir, window=plot_window)
+        fig_training_energy_safety(dfs, fig_dir, window=plot_window)
+        fig_validation_curves(dfs, fig_dir, window=min(10, plot_window))
+        fig_reward_decomposition(dfs, fig_dir, window=plot_window)
     else:
         print("[Warning] No training logs found — skipping training curve figures.")
 

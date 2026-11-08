@@ -139,7 +139,7 @@ def plot_trajectory_diagnostic(astar_data: dict, mappo_data: dict, obstacles: li
     plt.close()
     print(f"[Plotter] Saved publication trajectory diagnostic figure: {save_path}")
 
-def plot_training_convergence(csv_path: str, save_path: str):
+def plot_training_convergence(csv_path: str, save_path: str, window: Optional[int] = None):
     """
     Plots multi-line training convergence curves with moving averages and confidence bands.
     """
@@ -149,7 +149,10 @@ def plot_training_convergence(csv_path: str, save_path: str):
 
     df = pd.read_csv(csv_path)
     fig, axes = plt.subplots(2, 2, figsize=(14, 10), dpi=300)
-    window = max(3, len(df) // 10)
+    if window is None:
+        window = min(20, max(3, len(df) // 20))
+    elif window < 1:
+        window = 1
 
     # (a) Episode Return
     ax = axes[0, 0]
@@ -157,7 +160,8 @@ def plot_training_convergence(csv_path: str, save_path: str):
     smoothed = raw.rolling(window, min_periods=1).mean()
     std = raw.rolling(window, min_periods=1).std().fillna(0)
     ax.plot(df["episode"], raw, color='#93c5fd', alpha=0.5, label='Raw Return')
-    ax.plot(df["episode"], smoothed, color='#1d4ed8', linewidth=2.5, label=f'Moving Avg (w={window})')
+    label_ret = 'Return (Per-Episode)' if window <= 1 else f'Moving Avg (w={window})'
+    ax.plot(df["episode"], smoothed, color='#1d4ed8', linewidth=2.2, label=label_ret)
     ax.fill_between(df["episode"], smoothed - std, smoothed + std, color='#bfdbfe', alpha=0.4)
     ax.set_title("(a) Cumulative Episode Return", fontsize=11, fontweight='bold')
     ax.set_xlabel("Training Episode")
@@ -934,7 +938,7 @@ def plot_3d_flight_trajectories(eval_results: dict, obstacles: list, stations: d
     plt.close()
     print(f"[Plotter] Saved 3D flight trajectories figure: {save_path}")
 
-def plot_all_marl_training_convergence(csv_dict: dict, save_path: str):
+def plot_all_marl_training_convergence(csv_dict: dict, save_path: str, window: Optional[int] = None):
     """
     Plots multi-algorithm MARL training convergence comparison (MAPPO vs IPPO vs MADDPG vs CPPO):
     - (a) Episode Return
@@ -960,24 +964,29 @@ def plot_all_marl_training_convergence(csv_dict: dict, save_path: str):
                 continue
             loaded_any = True
             cfg = palette.get(key, {"name": key.upper(), "color": "#334155", "ls": "-", "lw": 1.8})
-            w = max(3, len(df) // 10)
+            if window is None:
+                w = min(20, max(3, len(df) // 20))
+            elif window <= 1:
+                w = 1
+            else:
+                w = window
 
             # (a) Episode Return
             ax1 = axes[0, 0]
-            smooth_ret = df["return"].rolling(w, min_periods=1).mean()
-            ax1.plot(df["episode"], smooth_ret, color=cfg["color"], linestyle=cfg["ls"], linewidth=cfg["lw"], label=cfg["name"])
+            smooth_ret = df["return"] if w <= 1 else df["return"].rolling(w, min_periods=1).mean()
+            ax1.plot(df["episode"], smooth_ret, color=cfg["color"], linestyle=cfg["ls"], linewidth=1.5 if w <= 1 else cfg["lw"], label=cfg["name"])
 
             # (b) Task Completion Rate
             ax2 = axes[0, 1]
             comp = (df["completed_tasks"] / np.maximum(1, df["completed_tasks"] + df["deadline_misses"])) * 100.0
-            smooth_comp = comp.rolling(w, min_periods=1).mean()
-            ax2.plot(df["episode"], smooth_comp, color=cfg["color"], linestyle=cfg["ls"], linewidth=cfg["lw"], label=cfg["name"])
+            smooth_comp = comp if w <= 1 else comp.rolling(w, min_periods=1).mean()
+            ax2.plot(df["episode"], smooth_comp, color=cfg["color"], linestyle=cfg["ls"], linewidth=1.5 if w <= 1 else cfg["lw"], label=cfg["name"])
 
             # (c) Fleet Energy (kJ)
             ax3 = axes[1, 0]
             energy_kj = df["total_energy"] / 1000.0
-            smooth_e = energy_kj.rolling(w, min_periods=1).mean()
-            ax3.plot(df["episode"], smooth_e, color=cfg["color"], linestyle=cfg["ls"], linewidth=cfg["lw"], label=cfg["name"])
+            smooth_e = energy_kj if w <= 1 else energy_kj.rolling(w, min_periods=1).mean()
+            ax3.plot(df["episode"], smooth_e, color=cfg["color"], linestyle=cfg["ls"], linewidth=1.5 if w <= 1 else cfg["lw"], label=cfg["name"])
 
             # (d) Validation Score
             ax4 = axes[1, 1]

@@ -16,7 +16,7 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 import numpy as np
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Optional, Any, List
 
 from env.observation_builder import (
     OBS_DIM,
@@ -68,10 +68,16 @@ class MADDPGActor(nn.Module):
         station_vec = obs[:, 6:9]
         dist = torch.norm(station_vec, dim=-1, keepdim=True) * 200.0
         dir_to_station = station_vec / (torch.norm(station_vec, dim=-1, keepdim=True) + 1e-6)
-        guidance = dir_to_station * torch.clamp((dist - 3.5) / 10.0, 0.0, 1.0)
+        # Smooth terminal attractor scaling: slows down inside 10m to dock smoothly into station
+        guidance = dir_to_station * torch.clamp(dist / 10.0, 0.0, 1.0)
 
-        obs_vec_xy = obs[:, -3:-1]
-        obs_dist = obs[:, -1:] * 50.0
+        # In observation_builder.py (OBS_DIM = 22):
+        # obs[:, 17:19]: 2D Direction Vector to Closest Obstacle [dx/d, dy/d]
+        # obs[:, 19:20]: Distance to Closest Obstacle Surface (normalized by 50.0m)
+        # obs[:, 20:22]: 2D Obstacle Clearance Tangent Vector [tx, ty]
+        obs_vec_xy = obs[:, 17:19]
+        obs_dist = obs[:, 19:20] * 50.0
+        tangent_precomputed = obs[:, 20:22]
         obs_dot = (dir_to_station[:, :2] * obs_vec_xy).sum(dim=-1, keepdim=True)
         
         # 2D cross-product to detect whether obstacle is on left or right of flight path:
@@ -81,8 +87,11 @@ class MADDPGActor(nn.Module):
         sign_turn = torch.where(cross_2d >= 0.0, -torch.ones_like(cross_2d), torch.ones_like(cross_2d))
         tangent_xy = torch.stack([-obs_vec_xy[:, 1], obs_vec_xy[:, 0]], dim=-1) * sign_turn
 
+        tangent_norm = torch.norm(tangent_precomputed, dim=-1, keepdim=True)
+        effective_tangent = torch.where(tangent_norm > 0.1, tangent_precomputed, tangent_xy)
+
         avoid_weight = torch.clamp((25.0 - obs_dist) / 20.0, 0.0, 1.8) * torch.clamp(obs_dot, 0.0, 1.0)
-        avoid_vector = 1.0 * tangent_xy - 0.6 * obs_vec_xy
+        avoid_vector = 1.0 * effective_tangent - 0.6 * obs_vec_xy
 
         # Add vertical climbing component when obstacle directly blocks horizontal path
         curr_alt = obs[:, 2:3] * 200.0
@@ -100,13 +109,22 @@ class MADDPGActor(nn.Module):
         offload_h = self.offload_backbone(offload_feat)
         learned_move = self.move_head(nav_h)
 
+        station_vec = obs[:, 6:9]
+        dist = torch.norm(station_vec, dim=-1, keepdim=True) * 200.0
+
         if self.policy_variant == "residual":
             nominal_guidance = self.compute_nominal_apf_guidance(obs)
-            raw_move = learned_move + 1.5 * nominal_guidance
+            rl_terminal_damping = torch.clamp((dist - 1.0) / 8.0, 0.0, 1.0)
+            raw_move = (0.4 * rl_terminal_damping) * learned_move + 2.0 * nominal_guidance
+        elif self.policy_variant == "apf_only":
+            nominal_guidance = self.compute_nominal_apf_guidance(obs)
+            raw_move = 2.0 * nominal_guidance
         else:
             raw_move = learned_move
 
-        move = torch.tanh(raw_move) * self.max_disp
+        # Proportional speed bounding near goal prevents overshoot / orbiting limit cycles
+        allowed_disp = torch.clamp(dist * 0.8, 0.3, self.max_disp)
+        move = torch.tanh(raw_move) * allowed_disp
         offload_logits = self.offload_head(offload_h)
         return move, offload_logits
 
@@ -214,9 +232,21 @@ class MADDPGAgent:
 
         self.buffer = ReplayBuffer(buffer_capacity, state_dim, obs_dim, num_uavs, self.action_dim_per_uav)
 
-    def get_actions(self, obs_dict: Dict[int, np.ndarray], explore: bool = True):
+    def get_actions(
+        self,
+        obs_dict: Dict[int, np.ndarray],
+        explore: Optional[bool] = None,
+        deterministic: Optional[bool] = None,
+        noise_std: Optional[float] = None
+    ):
+        if deterministic is not None:
+            explore = not deterministic
+        elif explore is None:
+            explore = True
+
         actions = {}
         act_vectors = {}
+        effective_noise = self.noise_std if noise_std is None else noise_std
 
         self.actor.eval()
         with torch.no_grad():
@@ -226,8 +256,9 @@ class MADDPGAgent:
 
                 m_np = move.squeeze(0).cpu().numpy()
                 if explore:
-                    m_np += np.random.normal(0, self.noise_std, size=3)
-                    m_np = np.clip(m_np, -15.0, 15.0)
+                    m_np += np.random.normal(0, effective_noise, size=3)
+                    max_d = float(torch.clamp(torch.norm(torch.tensor(obs_dict[j][6:9] * 200.0)) * 0.8, 0.3, 15.0).item())
+                    m_np = np.clip(m_np, -max_d, max_d)
 
                 # Gumbel-Softmax or argmax
                 if explore:

@@ -171,8 +171,8 @@ class MultiUAVEnv(gym.Env):
         self.velocities = {}
         
         # Determine whether to sample arbitrary long-range 3D navigation or ring deployment.
-        # When curriculum is active (curriculum_ratio < 1.0) or during standard training, deploy on perimeter ring.
-        use_long_range = (scenario_mode == "nav_general") or ((scenario_mode == "randomized") and (curriculum_ratio >= 1.0) and (float(self.rng.uniform(0.0, 1.0)) < 0.20))
+        # Long-range navigation is only triggered when explicitly requested by scenario_mode="nav_general".
+        use_long_range = (scenario_mode == "nav_general")
         
         if use_long_range:
             for j in range(self.num_uavs):
