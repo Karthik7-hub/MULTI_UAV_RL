@@ -13,19 +13,20 @@ The `caffeinate` wrapper keeps your Mac awake and running at full performance ev
 # Navigate to workspace
 cd ~/research_v2
 
-# Run full pipeline with sleep prevention
-caffeinate -dimsu bash run_experiments.sh
+# Run full pipeline with sleep prevention (works under both sh and bash)
+caffeinate -dimsu sh run_experiments.sh
 ```
 
 *(Alternatively, paste the entire inline block:)*
 ```bash
 cd ~/research_v2
-caffeinate -dimsu bash -c '
+caffeinate -dimsu sh -c '
 set -e
-if [ ! -d ".venv" ]; then python3 -m venv .venv; fi
-source .venv/bin/activate
-pip install --upgrade pip
-pip install -r requirements.txt
+if [ -z "${VIRTUAL_ENV:-}" ] && [ -z "${CONDA_PREFIX:-}" ]; then
+    if [ ! -f ".venv/bin/activate" ]; then rm -rf .venv && python3 -m venv .venv; fi
+    . ./.venv/bin/activate
+fi
+python3 -c "import torch, numpy, pandas, gymnasium, matplotlib, flask, pytest" 2>/dev/null || pip install --upgrade-strategy only-if-needed -r requirements.txt
 
 python train.py --model mappo --variant pure --episodes 1000 --eval_freq 1 --seed 42 --device auto
 python train.py --model mappo --variant residual --episodes 1000 --eval_freq 1 --seed 42 --device auto
@@ -47,21 +48,29 @@ echo "[DONE] Complete suite executed and synced successfully!"
 
 ---
 
-### 🐧 Linux (Ubuntu / Debian / CentOS / Arch)
-Run directly in your terminal, or with `nohup` for background execution on a remote server/GPU cluster:
+### 🐧 Linux (Ubuntu / Debian / CentOS / Arch / Quadro P2000 & Modern GPUs)
+
+> [!TIP]
+> **NVIDIA Quadro P2000 / Pascal (`sm_61`) Compatibility:**
+> - `run_experiments.sh` automatically preserves your active `conda` / `.venv` Python environment (e.g. `torch==2.0.1` + CUDA 11.8) without upgrading PyTorch or NumPy.
+> - If you run on a newer PyTorch build (`>=2.7`) that dropped `sm_61`, `--device auto` automatically probes GPU kernel execution and falls back cleanly to CPU without crashing.
+> - To use CUDA directly on a Quadro P2000 (`sm_61`), install PyTorch CUDA 11.8 before running:
+>   `pip install torch==2.0.1 --index-url https://download.pytorch.org/whl/cu118 "numpy<2.0"`
+
+Run with `sh run_experiments.sh` or directly with `./run_experiments.sh`:
 
 ```bash
 # Navigate to workspace
 cd ~/research_v2
 
-# Make script executable and run
-chmod +x run_experiments.sh
-./run_experiments.sh
+# Run directly with sh or bash (both work cleanly!)
+sh run_experiments.sh
 ```
 
 *(For remote servers over SSH without disconnection risk:)*
 ```bash
-nohup ./run_experiments.sh > training_suite.log 2>&1 &
+chmod +x run_experiments.sh
+nohup sh run_experiments.sh > training_suite.log 2>&1 &
 tail -f training_suite.log
 ```
 
@@ -109,9 +118,9 @@ Write-Host "[DONE] Complete suite executed and synced successfully!" -Foreground
 If you prefer to train, evaluate, and inspect models individually:
 
 ### Step 0: Activate Environment
-* **macOS / Linux:**
+* **macOS / Linux (`sh` / `bash`):**
   ```bash
-  source .venv/bin/activate
+  . ./.venv/bin/activate
   ```
 * **Windows PowerShell:**
   ```powershell

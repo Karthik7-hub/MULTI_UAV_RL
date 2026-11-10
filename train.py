@@ -120,7 +120,7 @@ def train_mappo(
     device: str = "auto",
     policy_variant: str = "pure",
     ablation: Optional[str] = None,
-    eval_freq: int = 10,
+    eval_freq: int = 1,
     save_tag: Optional[str] = None,
     curriculum: bool = False,
     output_dir: Optional[str] = None
@@ -283,9 +283,9 @@ def train_mappo(
 
         # Periodic Validation on held-out seeds
         val_stats = {"val_return": np.nan, "val_comp_rate": np.nan, "val_energy": np.nan, "val_interventions": np.nan, "val_arrival_rate": np.nan, "val_score": np.nan}
-        if ep % eval_freq == 0:
+        if ep % eval_freq == 0 or ep == 1:
             val_stats = evaluate_validation(env, agent, "mappo")
-            if ep >= 10 and val_stats["val_score"] > best_val_score:
+            if (ep >= 10 or ep == num_episodes) and val_stats["val_score"] > best_val_score:
                 best_val_score = val_stats["val_score"]
                 agent.save_checkpoint(best_ckpt_path)
 
@@ -320,7 +320,7 @@ def train_mappo(
             "Steps/s": f"{env_steps_per_sec:.0f}"
         })
 
-        if ep % 10 == 0 or ep == 1:
+        if ep % eval_freq == 0 or ep == 1:
             val_str = f"ValRet: {val_stats['val_return']:6.1f} | " if not np.isnan(val_stats["val_return"]) else ""
             pbar.write(f"[{tag.upper()}] Ep {ep:3d}/{num_episodes} | Return: {ep_reward:7.2f} | {val_str}Arrivals: {arr_rate:5.1f}% | Tasks: {comp_rate:5.1f}% | Energy: {ep_energy/1000.0:6.1f} kJ | Safety: {ep_interventions} | Steps/s: {env_steps_per_sec:.0f}")
 
@@ -333,9 +333,10 @@ def train_mappo(
 
     if "plot_training_convergence" in globals():
         try:
-            plot_training_convergence(csv_log_path, os.path.join(fig_dir, f"training_convergence_{tag}.png"))
+            plot_win = 1 if eval_freq == 1 else None
+            plot_training_convergence(csv_log_path, os.path.join(fig_dir, f"training_convergence_{tag}.png"), window=plot_win)
             if tag in ["mappo", "mappo_pure"]:
-                plot_training_convergence(csv_log_path, os.path.join(fig_dir, "training_convergence_curves.png"))
+                plot_training_convergence(csv_log_path, os.path.join(fig_dir, "training_convergence_curves.png"), window=plot_win)
             plot_aerodynamic_power_curve(env.aero, os.path.join(fig_dir, "aerodynamic_power_curve.png"))
         except Exception as e:
             print(f"[Warning] Failed to generate convergence plot: {e}")
@@ -343,7 +344,7 @@ def train_mappo(
     print(f"[{tag.upper()} Finished] Best Checkpoint: {best_ckpt_path} | Final: {final_ckpt_path} | Log: {csv_log_path}")
     return best_ckpt_path
 
-def train_ippo(num_episodes: int = 80, seed: int = 42, device: str = "auto", policy_variant: str = "pure", eval_freq: int = 10, curriculum: bool = True, output_dir: Optional[str] = None) -> str:
+def train_ippo(num_episodes: int = 80, seed: int = 42, device: str = "auto", policy_variant: str = "pure", eval_freq: int = 1, curriculum: bool = True, output_dir: Optional[str] = None) -> str:
     dev = DeviceManager.select_device(device)
     DeviceManager.print_diagnostics(dev, seed=seed, extra_config={"Algorithm": "Independent PPO (IPPO)", "Variant": policy_variant, "Episodes": num_episodes})
 
@@ -488,7 +489,7 @@ def train_ippo(num_episodes: int = 80, seed: int = 42, device: str = "auto", pol
             "Steps/s": f"{env_steps_per_sec:.0f}"
         })
 
-        if ep % 10 == 0 or ep == 1:
+        if ep % eval_freq == 0 or ep == 1:
             val_str = f"ValRet: {val_stats['val_return']:6.1f} | " if not np.isnan(val_stats["val_return"]) else ""
             pbar.write(f"[IPPO]  Ep {ep:3d}/{num_episodes} | Return: {ep_reward:7.2f} | {val_str}Arrivals: {arr_rate:5.1f}% | Tasks: {comp_rate:5.1f}% | Energy: {ep_energy/1000.0:6.1f} kJ | Steps/s: {env_steps_per_sec:.0f}")
 
@@ -503,13 +504,13 @@ def train_ippo(num_episodes: int = 80, seed: int = 42, device: str = "auto", pol
     pd.DataFrame(metrics).to_csv(csv_log, index=False)
     if "plot_training_convergence" in globals():
         try:
-            plot_training_convergence(csv_log, os.path.join(fig_dir, f"training_convergence_{tag}.png"))
+            plot_training_convergence(csv_log, os.path.join(fig_dir, f"training_convergence_{tag}.png"), window=1 if eval_freq == 1 else None)
         except Exception as e:
             print(f"[Warning] Failed to generate IPPO plot: {e}")
     print(f"[IPPO Finished] Best Checkpoint: {best_ckpt} | Final: {final_ckpt} | Log: {csv_log}")
     return best_ckpt
 
-def train_maddpg(num_episodes: int = 80, seed: int = 42, device: str = "auto", policy_variant: str = "pure", eval_freq: int = 10, curriculum: bool = True, output_dir: Optional[str] = None) -> str:
+def train_maddpg(num_episodes: int = 80, seed: int = 42, device: str = "auto", policy_variant: str = "pure", eval_freq: int = 1, curriculum: bool = True, output_dir: Optional[str] = None) -> str:
     dev = DeviceManager.select_device(device)
     DeviceManager.print_diagnostics(dev, seed=seed, extra_config={"Algorithm": "Multi-Agent DDPG (MADDPG)", "Variant": policy_variant, "Episodes": num_episodes})
 
@@ -635,7 +636,7 @@ def train_maddpg(num_episodes: int = 80, seed: int = 42, device: str = "auto", p
             "Steps/s": f"{env_steps_per_sec:.0f}"
         })
 
-        if ep % 10 == 0 or ep == 1:
+        if ep % eval_freq == 0 or ep == 1:
             val_str = f"ValRet: {val_stats['val_return']:6.1f} | " if not np.isnan(val_stats["val_return"]) else ""
             pbar.write(f"[MADDPG] Ep {ep:3d}/{num_episodes} | Return: {ep_reward:7.2f} | {val_str}Arrivals: {arr_rate:5.1f}% | Tasks: {comp_rate:5.1f}% | Energy: {ep_energy/1000.0:6.1f} kJ | Steps/s: {env_steps_per_sec:.0f}")
 
@@ -650,13 +651,13 @@ def train_maddpg(num_episodes: int = 80, seed: int = 42, device: str = "auto", p
     pd.DataFrame(metrics).to_csv(csv_log, index=False)
     if "plot_training_convergence" in globals():
         try:
-            plot_training_convergence(csv_log, os.path.join(fig_dir, f"training_convergence_{tag}.png"))
+            plot_training_convergence(csv_log, os.path.join(fig_dir, f"training_convergence_{tag}.png"), window=1 if eval_freq == 1 else None)
         except Exception as e:
             print(f"[Warning] Failed to generate MADDPG plot: {e}")
     print(f"[MADDPG Finished] Best Checkpoint: {best_ckpt} | Final: {final_ckpt} | Log: {csv_log}")
     return best_ckpt
 
-def train_cppo(num_episodes: int = 80, seed: int = 42, device: str = "auto", eval_freq: int = 10, curriculum: bool = True, output_dir: Optional[str] = None) -> str:
+def train_cppo(num_episodes: int = 80, seed: int = 42, device: str = "auto", eval_freq: int = 1, curriculum: bool = True, output_dir: Optional[str] = None) -> str:
     dev = DeviceManager.select_device(device)
     DeviceManager.print_diagnostics(dev, seed=seed, extra_config={"Algorithm": "Centralized PPO (CPPO, CTCE)", "Episodes": num_episodes})
 
@@ -815,7 +816,7 @@ def train_cppo(num_episodes: int = 80, seed: int = 42, device: str = "auto", eva
             "Steps/s": f"{env_steps_per_sec:.0f}"
         })
 
-        if ep % 10 == 0 or ep == 1:
+        if ep % eval_freq == 0 or ep == 1:
             val_str = f"ValRet: {val_stats['val_return']:6.1f} | " if not np.isnan(val_stats["val_return"]) else ""
             pbar.write(f"[CPPO]  Ep {ep:3d}/{num_episodes} | Return: {ep_reward:7.2f} | {val_str}Arrivals: {arr_rate:5.1f}% | Tasks: {comp_rate:5.1f}% | Energy: {ep_energy/1000.0:6.1f} kJ | Steps/s: {env_steps_per_sec:.0f}")
 
@@ -823,13 +824,13 @@ def train_cppo(num_episodes: int = 80, seed: int = 42, device: str = "auto", eva
     pd.DataFrame(metrics).to_csv(csv_log, index=False)
     if "plot_training_convergence" in globals():
         try:
-            plot_training_convergence(csv_log, os.path.join(fig_dir, "training_convergence_cppo.png"))
+            plot_training_convergence(csv_log, os.path.join(fig_dir, "training_convergence_cppo.png"), window=1 if eval_freq == 1 else None)
         except Exception as e:
             print(f"[Warning] Failed to generate CPPO plot: {e}")
     print(f"[CPPO Finished] Best Checkpoint: {best_ckpt} | Final: {final_ckpt} | Log: {csv_log}")
     return best_ckpt
 
-def train_all(num_episodes: int = 500, seed: int = 42, device: str = "auto", policy_variant: str = "pure", curriculum: bool = True, eval_freq: int = 10, output_dir: Optional[str] = None):
+def train_all(num_episodes: int = 500, seed: int = 42, device: str = "auto", policy_variant: str = "pure", curriculum: bool = True, eval_freq: int = 1, output_dir: Optional[str] = None):
     """Trains all four primary learning algorithms under identical seed and episode budgets with Phase 2 spatial randomization."""
     print("\n" + "=" * 80)
     print(f" TRAINING COMPLETE MARL COMPARISON SUITE (Episodes: {num_episodes}, Seed: {seed}, Variant: {policy_variant}, Curriculum: {curriculum}, EvalFreq: {eval_freq})")
@@ -851,7 +852,7 @@ def train_all(num_episodes: int = 500, seed: int = 42, device: str = "auto", pol
     }
     if "plot_all_marl_training_convergence" in globals():
         try:
-            plot_all_marl_training_convergence(csv_dict, os.path.join(fig_dir, "marl_training_convergence_comparison.png"))
+            plot_all_marl_training_convergence(csv_dict, os.path.join(fig_dir, "marl_training_convergence_comparison.png"), window=1 if eval_freq == 1 else None)
             print(f"[Suite Finished] Generated multi-algorithm convergence curve: {os.path.join(fig_dir, 'marl_training_convergence_comparison.png')}")
         except Exception as e:
             print(f"[Warning] Failed to generate multi-algorithm comparison plot: {e}")
@@ -872,7 +873,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--episodes", type=int, default=500, help="Number of training episodes")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--device", type=str, default="auto", choices=["auto", "cuda", "cpu", "mps"], help="Compute device")
-    parser.add_argument("--eval_freq", type=int, default=10, help="Validation frequency in episodes (use 1 for logging validation on every episode)")
+    parser.add_argument("--eval_freq", type=int, default=1, help="Validation frequency in episodes (default: 1, logs validation on every episode)")
     parser.add_argument("--curriculum", action="store_true", default=True, help="Enable curriculum learning schedule")
     parser.add_argument("--output_dir", type=str, default=None, help="Quarantined output directory for results")
     return parser

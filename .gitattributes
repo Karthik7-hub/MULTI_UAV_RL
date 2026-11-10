@@ -1,0 +1,4 @@
+# Keep shell scripts strictly LF so `sh` and `bash` work cleanly across Linux/macOS/Windows git checkouts
+*.sh text eol=lf
+*.ps1 text eol=crlf
+

@@ -5,16 +5,32 @@ Write-Host "====================================================================
 Write-Host " MULTI-UAV MARL REPRODUCIBILITY SUITE (WINDOWS)" -ForegroundColor Cyan
 Write-Host "==========================================================================" -ForegroundColor Cyan
 
-# 1. Setup virtual environment
-if (-not (Test-Path ".venv")) {
+# 1. Select Python environment (respect active venv/conda if already active)
+if ($env:VIRTUAL_ENV -or $env:CONDA_PREFIX) {
+    Write-Host "[Init] Using active environment: $($env:VIRTUAL_ENV)$($env:CONDA_PREFIX)" -ForegroundColor Yellow
+} elseif (Test-Path ".\.venv\Scripts\Activate.ps1") {
+    Write-Host "[Init] Activating existing .venv..." -ForegroundColor Yellow
+    & ".\.venv\Scripts\Activate.ps1"
+} else {
     Write-Host "[Init] Creating Python virtual environment .venv..." -ForegroundColor Yellow
     python -m venv .venv
+    & ".\.venv\Scripts\Activate.ps1"
 }
-& ".\.venv\Scripts\Activate.ps1"
 
-Write-Host "[Init] Upgrading pip and verifying dependencies..." -ForegroundColor Yellow
-python -m pip install --upgrade pip
-pip install -r requirements.txt
+$depsOk = $true
+try {
+    python -c "import torch, numpy, pandas, gymnasium, matplotlib, flask, pytest" 2>$null
+    if ($LASTEXITCODE -ne 0) { $depsOk = $false }
+} catch {
+    $depsOk = $false
+}
+
+if ($depsOk) {
+    Write-Host "[Init] All dependencies already installed — keeping current PyTorch/CUDA & NumPy builds intact." -ForegroundColor Yellow
+} else {
+    Write-Host "[Init] Installing missing dependencies..." -ForegroundColor Yellow
+    python -m pip install --upgrade-strategy only-if-needed -r requirements.txt
+}
 
 # 2. Sequential training of all algorithms (1000 episodes, per-episode validation logging)
 Write-Host "`n=== [1/8] Training Proposed Pure MAPPO (CTDE, 1000 Episodes) ===" -ForegroundColor Green
