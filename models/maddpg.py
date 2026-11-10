@@ -248,28 +248,33 @@ class MADDPGAgent:
         act_vectors = {}
         effective_noise = self.noise_std if noise_std is None else noise_std
 
-        self.actor.eval()
+        if self.actor.training:
+            self.actor.eval()
         with torch.no_grad():
-            for j in range(self.num_uavs):
-                t_o = torch.tensor(obs_dict[j], dtype=torch.float32, device=self.device).unsqueeze(0)
-                move, offload_logits = self.actor(t_o)
+            obs_batch = np.stack([obs_dict[j] for j in range(self.num_uavs)], axis=0)
+            t_o = torch.as_tensor(obs_batch, dtype=torch.float32, device=self.device)
+            moves, offload_logits = self.actor(t_o)
 
-                m_np = move.squeeze(0).cpu().numpy()
+            m_all = moves.cpu().numpy()
+            if explore:
+                offload_probs = F.gumbel_softmax(offload_logits, tau=1.0, hard=True)
+                o_ints = torch.argmax(offload_probs, dim=-1).cpu().numpy()
+                o_vecs = offload_probs.cpu().numpy()
+            else:
+                o_ints = torch.argmax(offload_logits, dim=-1).cpu().numpy()
+                o_vecs = np.zeros((self.num_uavs, self.num_offload_actions), dtype=np.float32)
+                for j in range(self.num_uavs):
+                    o_vecs[j, int(o_ints[j])] = 1.0
+
+            for j in range(self.num_uavs):
+                m_np = np.array(m_all[j], dtype=np.float32, copy=True)
                 if explore:
-                    m_np += np.random.normal(0, effective_noise, size=3)
-                    max_d = float(torch.clamp(torch.norm(torch.tensor(obs_dict[j][6:9] * 200.0)) * 0.8, 0.3, 15.0).item())
+                    m_np += np.random.normal(0.0, effective_noise, size=3).astype(np.float32)
+                    max_d = float(np.clip(np.linalg.norm(obs_dict[j][6:9]) * 200.0 * 0.8, 0.3, 15.0))
                     m_np = np.clip(m_np, -max_d, max_d)
 
-                # Gumbel-Softmax or argmax
-                if explore:
-                    offload_prob = F.gumbel_softmax(offload_logits, tau=1.0, hard=True).squeeze(0)
-                    o_int = int(torch.argmax(offload_prob).item())
-                    o_vec = offload_prob.cpu().numpy()
-                else:
-                    o_int = int(torch.argmax(offload_logits, dim=-1).item())
-                    o_vec = np.zeros(self.num_offload_actions, dtype=np.float32)
-                    o_vec[o_int] = 1.0
-
+                o_int = int(o_ints[j])
+                o_vec = o_vecs[j]
                 actions[j] = {"move": m_np.astype(np.float32), "offload": o_int}
                 act_vectors[j] = np.concatenate([m_np, o_vec]).astype(np.float32)
 
@@ -303,17 +308,20 @@ class MADDPGAgent:
 
         states, obs, actions, rewards, next_states, next_obs, dones = self.buffer.sample(batch_size, self.device)
 
+        if not self.actor.training:
+            self.actor.train()
+        if not self.critic.training:
+            self.critic.train()
+
         # ---------------------------------------------------------------------
-        # 1. Update Centralized Q-Critic
+        # 1. Update Centralized Q-Critic (Batched across all N UAVs)
         # ---------------------------------------------------------------------
         with torch.no_grad():
-            next_acts = []
-            for j in range(self.num_uavs):
-                n_m, n_o = self.actor_target(next_obs[:, j])
-                # Deterministic target offloading action to reduce Bellman target variance
-                n_o_prob = F.one_hot(torch.argmax(n_o, dim=-1), num_classes=self.num_offload_actions).float()
-                next_acts.append(torch.cat([n_m, n_o_prob], dim=-1))
-            flat_next_acts = torch.cat(next_acts, dim=-1)
+            flat_next_obs = next_obs.reshape(batch_size * self.num_uavs, self.obs_dim)
+            n_m, n_o = self.actor_target(flat_next_obs)
+            # Deterministic target offloading action to reduce Bellman target variance
+            n_o_prob = F.one_hot(torch.argmax(n_o, dim=-1), num_classes=self.num_offload_actions).float()
+            flat_next_acts = torch.cat([n_m, n_o_prob], dim=-1).view(batch_size, self.total_action_dim)
             target_q = self.critic_target(next_states, flat_next_acts).squeeze(-1)
             # TD Target y using genuine termination mask
             y = rewards + (1.0 - dones) * self.gamma * target_q
@@ -328,19 +336,17 @@ class MADDPGAgent:
         self.critic_opt.step()
 
         # ---------------------------------------------------------------------
-        # 2. Update Decentralized Actor (Deterministic Policy Gradient)
+        # 2. Update Decentralized Actor (Batched Deterministic Policy Gradient)
         # ---------------------------------------------------------------------
         # Freeze critic parameters to prevent gradient accumulation into critic
         for p in self.critic.parameters():
             p.requires_grad = False
 
-        pred_acts = []
-        for j in range(self.num_uavs):
-            p_m, p_o = self.actor(obs[:, j])
-            # Differentiable continuous relaxation during actor backward
-            p_o_prob = F.gumbel_softmax(p_o, tau=1.0, hard=False)
-            pred_acts.append(torch.cat([p_m, p_o_prob], dim=-1))
-        flat_pred_acts = torch.cat(pred_acts, dim=-1)
+        flat_obs = obs.reshape(batch_size * self.num_uavs, self.obs_dim)
+        p_m, p_o = self.actor(flat_obs)
+        # Differentiable continuous relaxation during actor backward
+        p_o_prob = F.gumbel_softmax(p_o, tau=1.0, hard=False)
+        flat_pred_acts = torch.cat([p_m, p_o_prob], dim=-1).view(batch_size, self.total_action_dim)
         actor_loss = -self.critic(states, flat_pred_acts).mean()
 
         self.actor_opt.zero_grad()

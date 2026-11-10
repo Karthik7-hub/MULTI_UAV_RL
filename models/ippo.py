@@ -77,31 +77,35 @@ class IPPOAgent:
         act_offload_dict = {}
         log_probs = {}
 
-        self.actor.eval()
+        if self.actor.training:
+            self.actor.eval()
         with torch.no_grad():
-            for j in range(self.num_uavs):
-                t_obs = torch.tensor(obs_dict[j], dtype=torch.float32, device=self.device).unsqueeze(0)
-                move, offload, log_p = self.actor.sample_action(t_obs, deterministic=deterministic)
+            obs_batch = np.stack([obs_dict[j] for j in range(self.num_uavs)], axis=0)
+            t_obs = torch.as_tensor(obs_batch, dtype=torch.float32, device=self.device)
+            move, offload, log_p = self.actor.sample_action(t_obs, deterministic=deterministic)
 
-                m_np = move.squeeze(0).cpu().numpy()
-                o_int = int(offload.squeeze(0).item())
-                actions[j] = {"move": m_np, "offload": o_int}
-                act_move_dict[j] = m_np
-                act_offload_dict[j] = o_int
-                log_probs[j] = float(log_p.squeeze(0).item())
+            m_np = move.cpu().numpy()
+            o_np = offload.cpu().numpy()
+            lp_np = log_p.cpu().numpy()
+            for j in range(self.num_uavs):
+                m_j = np.array(m_np[j], dtype=np.float32, copy=True)
+                o_j = int(o_np[j])
+                actions[j] = {"move": m_j, "offload": o_j}
+                act_move_dict[j] = m_j
+                act_offload_dict[j] = o_j
+                log_probs[j] = float(lp_np[j])
 
         return actions, act_move_dict, act_offload_dict, log_probs
 
     def get_value(self, obs_dict: Dict[int, np.ndarray]) -> float:
         """Computes mean value across local observations."""
-        self.critic.eval()
+        if self.critic.training:
+            self.critic.eval()
         with torch.no_grad():
-            vals = []
-            for j in range(self.num_uavs):
-                t_o = torch.tensor(obs_dict[j], dtype=torch.float32, device=self.device).unsqueeze(0)
-                v = self.critic(t_o)
-                vals.append(float(v.squeeze(0).item()))
-            return float(np.mean(vals))
+            obs_batch = np.stack([obs_dict[j] for j in range(self.num_uavs)], axis=0)
+            t_o = torch.as_tensor(obs_batch, dtype=torch.float32, device=self.device)
+            vals = self.critic(t_o)
+            return float(vals.mean().item())
 
     def update(
         self,

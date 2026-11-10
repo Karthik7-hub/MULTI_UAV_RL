@@ -23,6 +23,7 @@ obs[20:22] | 2D Obstacle Clearance Tangent Vector    | unit vector [0, 1]| later
 Total dimension: 3 + 3 + 3 + 1 + 3 + 1 + 3 + 3 + 2 = 22 floats.
 """
 
+import math
 import numpy as np
 from typing import List, Tuple, Dict, Any, Optional
 
@@ -103,9 +104,11 @@ def compute_obstacle_clearance_tangent(
     Returns:
         np.ndarray of shape (2,) with float32 values. Norm is strictly bounded in [0.0, 1.0].
     """
-    pos_xy = np.asarray(pos[:2], dtype=np.float32)
+    px = float(pos[0])
+    py = float(pos[1])
     pos_z = float(pos[2]) if len(pos) > 2 else 50.0
-    station_xy = np.asarray(station_pos[:2], dtype=np.float32)
+    sx = float(station_pos[0])
+    sy = float(station_pos[1])
 
     min_d_surf = float("inf")
     closest_obs_info = None
@@ -113,15 +116,14 @@ def compute_obstacle_clearance_tangent(
     for obs in obstacles:
         if isinstance(obs, dict):
             if obs.get("type") == "sphere":
-                cx, cy, cz, r = obs["cx"], obs["cy"], obs["cz"], obs["radius"]
+                cx, cy, cz, r = float(obs["cx"]), float(obs["cy"]), float(obs["cz"]), float(obs["radius"])
                 h = cz + r
             else:
-                cx, cy, r, h = obs["cx"], obs["cy"], obs["radius"], obs["height"]
+                cx, cy, r, h = float(obs["cx"]), float(obs["cy"]), float(obs["radius"]), float(obs["height"])
         else:
-            cx, cy, r, h = obs[0], obs[1], obs[2], obs[3]
+            cx, cy, r, h = float(obs[0]), float(obs[1]), float(obs[2]), float(obs[3])
 
-        c_xy = np.array([cx, cy], dtype=np.float32)
-        d_xy = float(np.linalg.norm(pos_xy - c_xy))
+        d_xy = math.hypot(px - cx, py - cy)
         d_surf = d_xy - r
 
         if d_surf < min_d_surf:
@@ -138,34 +140,36 @@ def compute_obstacle_clearance_tangent(
         return np.zeros(2, dtype=np.float32)
 
     # Unit vector from UAV to obstacle center
-    r_vec = (np.array([cx, cy], dtype=np.float32) - pos_xy) / max(1e-6, d_xy)
+    inv_d_xy = 1.0 / max(1e-6, d_xy)
+    rx = (cx - px) * inv_d_xy
+    ry = (cy - py) * inv_d_xy
 
     # Unit vector from UAV toward station
-    vec_goal = station_xy - pos_xy
-    d_goal = float(np.linalg.norm(vec_goal))
+    gx = sx - px
+    gy = sy - py
+    d_goal = math.hypot(gx, gy)
     if d_goal < 1e-4:
         return np.zeros(2, dtype=np.float32)
-    u_goal = vec_goal / d_goal
+    ugx = gx / d_goal
+    ugy = gy / d_goal
 
     # If obstacle is behind the UAV flight path (u_goal . r_vec <= 0.0), no detour needed
-    if float(np.dot(u_goal, r_vec)) <= 0.0:
+    if (ugx * rx + ugy * ry) <= 0.0:
         return np.zeros(2, dtype=np.float32)
 
     # 2D cross product: u_goal_x * r_y - u_goal_y * r_x
-    cross = float(u_goal[0] * r_vec[1] - u_goal[1] * r_vec[0])
+    cross = ugx * ry - ugy * rx
     # cross >= 0 => obstacle to the left => steer right (-tangent)
     # cross < 0 => obstacle to the right => steer left (+tangent)
     sign = -1.0 if cross >= 0.0 else 1.0
 
     # Perpendicular tangent to r_vec: [-r_y, r_x]
-    tangent = sign * np.array([-r_vec[1], r_vec[0]], dtype=np.float32)
-    norm = float(np.linalg.norm(tangent))
+    tx = sign * (-ry)
+    ty = sign * rx
+    norm = math.hypot(tx, ty)
     if norm > 1e-6:
-        tangent = tangent / norm
-    else:
-        tangent = np.zeros(2, dtype=np.float32)
-
-    return tangent
+        return np.array([tx / norm, ty / norm], dtype=np.float32)
+    return np.zeros(2, dtype=np.float32)
 
 
 def build_single_uav_obs(
@@ -245,35 +249,45 @@ def build_single_uav_obs(
     peer_feat = np.array(peer_dists[:num_peers_expected], dtype=np.float32)
 
     # 6. Closest Obstacle Direction and Surface Clearance (3 floats)
+    px, py, pz = float(pos[0]), float(pos[1]), float(pos[2])
     min_obs_d = float("inf")
-    closest_dir = np.zeros(2, dtype=np.float32)
+    cdx, cdy = 0.0, 0.0
 
     for obs in obstacles:
         if isinstance(obs, dict):
             if obs.get("type") == "sphere":
-                cx, cy, cz, r = obs["cx"], obs["cy"], obs["cz"], obs["radius"]
-                d_3d = float(np.linalg.norm(pos - np.array([cx, cy, cz])))
+                cx, cy, cz, r = float(obs["cx"]), float(obs["cy"]), float(obs["cz"]), float(obs["radius"])
+                dx = cx - px
+                dy = cy - py
+                dz = cz - pz
+                d_3d = math.sqrt(dx * dx + dy * dy + dz * dz)
                 d_surf = d_3d - r
                 if d_surf < min_obs_d:
                     min_obs_d = d_surf
-                    d_xy = float(np.linalg.norm(pos[:2] - np.array([cx, cy])))
+                    d_xy = math.hypot(dx, dy)
                     if d_xy > 1e-4:
-                        closest_dir = (np.array([cx, cy], dtype=np.float32) - pos[:2]) / d_xy
+                        cdx, cdy = dx / d_xy, dy / d_xy
+                    else:
+                        cdx, cdy = 0.0, 0.0
                 continue
             else:
-                cx, cy, r, h = obs["cx"], obs["cy"], obs["radius"], obs["height"]
+                cx, cy, r = float(obs["cx"]), float(obs["cy"]), float(obs["radius"])
         else:
-            cx, cy, r, h = obs[0], obs[1], obs[2], obs[3]
+            cx, cy, r = float(obs[0]), float(obs[1]), float(obs[2])
 
-        d_xy = float(np.linalg.norm(pos[:2] - np.array([cx, cy])))
+        dx = cx - px
+        dy = cy - py
+        d_xy = math.hypot(dx, dy)
         d_surf = d_xy - r
         if d_surf < min_obs_d:
             min_obs_d = d_surf
             if d_xy > 1e-4:
-                closest_dir = (np.array([cx, cy], dtype=np.float32) - pos[:2]) / d_xy
+                cdx, cdy = dx / d_xy, dy / d_xy
+            else:
+                cdx, cdy = 0.0, 0.0
 
-    surf_dist_norm = float(np.clip(min_obs_d / 50.0, -1.0, 1.0))
-    obs_feat = np.array([closest_dir[0], closest_dir[1], surf_dist_norm], dtype=np.float32)
+    surf_dist_norm = float(min(1.0, max(-1.0, min_obs_d / 50.0)))
+    obs_feat = np.array([cdx, cdy, surf_dist_norm], dtype=np.float32)
 
     # 7. Obstacle Clearance Tangent Vector (2 floats)
     tangent_feat = compute_obstacle_clearance_tangent(pos, station_pos, obstacles)

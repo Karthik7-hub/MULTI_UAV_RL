@@ -19,7 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import torch
 import numpy as np
 import pandas as pd
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
 
 from config import MasterConfig
 from env.multi_uav_env import MultiUAVEnv
@@ -48,6 +48,9 @@ except ImportError:
         def write(self, s, *args, **kwargs):
             print(s)
 
+DEFAULT_VAL_SEEDS = (1001, 1002, 1003, 1004)
+
+
 def evaluate_validation(env: MultiUAVEnv, agent: Any, model_type: str, val_seeds: List[int] = [1001, 1002, 1003, 1004]) -> Dict[str, float]:
     """Evaluates agent deterministically on held-out randomized 3D validation scenarios."""
     val_returns = []
@@ -55,6 +58,7 @@ def evaluate_validation(env: MultiUAVEnv, agent: Any, model_type: str, val_seeds
     val_energies = []
     val_interventions = []
     val_arrivals = []
+    val_final_errs = []
 
     for s in val_seeds:
         scen = "randomized"
@@ -92,11 +96,12 @@ def evaluate_validation(env: MultiUAVEnv, agent: Any, model_type: str, val_seeds
         val_interventions.append(ep_interv)
         arr_cnt = sum(1 for a in info.get("arrival_steps", {}).values() if a is not None)
         val_arrivals.append((arr_cnt / env.num_uavs) * 100.0)
+        val_final_errs.append(float(info.get("fleet_mean_goal_error", 50.0)))
 
     avg_arrival = float(np.mean(val_arrivals))
     avg_ret = float(np.mean(val_returns))
     avg_interv = float(np.mean(val_interventions))
-    mean_final_err = float(info.get("fleet_mean_goal_error", 50.0))
+    mean_final_err = float(np.mean(val_final_errs))
     # Checkpoint selection metric prioritizes navigation arrival and goal proximity:
     if avg_arrival > 0.0:
         val_score = 1000.0 + avg_arrival * 100.0 - 0.5 * mean_final_err - 2.0 * avg_interv
@@ -113,6 +118,39 @@ def evaluate_validation(env: MultiUAVEnv, agent: Any, model_type: str, val_seeds
         "val_mean_final_dist": mean_final_err,
         "val_score": val_score
     }
+
+
+def run_periodic_validation(
+    env: MultiUAVEnv,
+    agent: Any,
+    model_type: str,
+    ep: int,
+    num_episodes: int,
+    eval_freq: int,
+    best_val_score: float,
+    best_ckpt_path: str,
+) -> Tuple[Dict[str, float], float]:
+    """Run held-out validation cleanly: full 4-seed sweep at checkpoints, 1 rotated seed in between."""
+    val_stats = {
+        "val_return": np.nan,
+        "val_comp_rate": np.nan,
+        "val_energy": np.nan,
+        "val_interventions": np.nan,
+        "val_arrival_rate": np.nan,
+        "val_score": np.nan,
+    }
+    if not (ep % eval_freq == 0 or ep == 1 or ep == num_episodes):
+        return val_stats, best_val_score
+
+    is_full_eval = (ep == 1 or ep % 10 == 0 or ep == num_episodes)
+    seeds = list(DEFAULT_VAL_SEEDS) if is_full_eval else [DEFAULT_VAL_SEEDS[(ep - 1) % len(DEFAULT_VAL_SEEDS)]]
+    val_stats = evaluate_validation(env, agent, model_type, val_seeds=seeds)
+
+    if is_full_eval and (ep >= 10 or num_episodes < 10) and val_stats["val_score"] > best_val_score:
+        best_val_score = val_stats["val_score"]
+        agent.save_checkpoint(best_ckpt_path)
+
+    return val_stats, best_val_score
 
 def train_mappo(
     num_episodes: int = 80,
@@ -282,12 +320,9 @@ def train_mappo(
         arr_rate = float(sum(1 for a in info.get("arrival_steps", {}).values() if a is not None) / env.num_uavs * 100.0)
 
         # Periodic Validation on held-out seeds
-        val_stats = {"val_return": np.nan, "val_comp_rate": np.nan, "val_energy": np.nan, "val_interventions": np.nan, "val_arrival_rate": np.nan, "val_score": np.nan}
-        if ep % eval_freq == 0 or ep == 1:
-            val_stats = evaluate_validation(env, agent, "mappo")
-            if (ep >= 10 or ep == num_episodes) and val_stats["val_score"] > best_val_score:
-                best_val_score = val_stats["val_score"]
-                agent.save_checkpoint(best_ckpt_path)
+        val_stats, best_val_score = run_periodic_validation(
+            env, agent, "mappo", ep, num_episodes, eval_freq, best_val_score, best_ckpt_path
+        )
 
         cum_env_steps = ep * cfg.mappo.episode_length
         env_steps_per_sec = cum_env_steps / max(1e-4, total_env_time)
@@ -451,12 +486,9 @@ def train_ippo(num_episodes: int = 80, seed: int = 42, device: str = "auto", pol
         comp_rate = (ep_completed / total_tasks) * 100.0
         arr_rate = float(sum(1 for a in info.get("arrival_steps", {}).values() if a is not None) / env.num_uavs * 100.0)
 
-        val_stats = {"val_return": np.nan, "val_comp_rate": np.nan, "val_energy": np.nan, "val_interventions": np.nan, "val_arrival_rate": np.nan, "val_score": np.nan}
-        if ep % eval_freq == 0 or ep == 1:
-            val_stats = evaluate_validation(env, agent, "ippo")
-            if val_stats.get("val_score", -float("inf")) > best_val_score:
-                best_val_score = val_stats["val_score"]
-                agent.save_checkpoint(best_ckpt)
+        val_stats, best_val_score = run_periodic_validation(
+            env, agent, "ippo", ep, num_episodes, eval_freq, best_val_score, best_ckpt
+        )
 
         cum_env_steps = ep * cfg.mappo.episode_length
         env_steps_per_sec = cum_env_steps / max(1e-4, total_env_time)
@@ -579,7 +611,7 @@ def train_maddpg(num_episodes: int = 80, seed: int = 42, device: str = "auto", p
             agent.buffer.add(state, obs, act_vecs, r, next_state, next_obs, done, terminated=last_terminated)
 
             t_up_start = time.time()
-            if agent.buffer.size >= 500:
+            if (t % 2 == 0) and agent.buffer.size >= 500:
                 agent.update(batch_size=cfg.mappo.batch_size)
             total_update_time += (time.time() - t_up_start)
 
@@ -598,12 +630,9 @@ def train_maddpg(num_episodes: int = 80, seed: int = 42, device: str = "auto", p
         comp_rate = (ep_completed / total_tasks) * 100.0
         arr_rate = float(sum(1 for a in info.get("arrival_steps", {}).values() if a is not None) / env.num_uavs * 100.0)
 
-        val_stats = {"val_return": np.nan, "val_comp_rate": np.nan, "val_energy": np.nan, "val_interventions": np.nan, "val_arrival_rate": np.nan, "val_score": np.nan}
-        if ep % eval_freq == 0 or ep == 1:
-            val_stats = evaluate_validation(env, agent, "maddpg")
-            if val_stats.get("val_score", -float("inf")) > best_val_score:
-                best_val_score = val_stats["val_score"]
-                agent.save_checkpoint(best_ckpt)
+        val_stats, best_val_score = run_periodic_validation(
+            env, agent, "maddpg", ep, num_episodes, eval_freq, best_val_score, best_ckpt
+        )
 
         cum_env_steps = ep * cfg.mappo.episode_length
         env_steps_per_sec = cum_env_steps / max(1e-4, total_env_time)
@@ -778,12 +807,9 @@ def train_cppo(num_episodes: int = 80, seed: int = 42, device: str = "auto", eva
         comp_rate = (ep_completed / total_tasks) * 100.0
         arr_rate = float(sum(1 for a in info.get("arrival_steps", {}).values() if a is not None) / env.num_uavs * 100.0)
 
-        val_stats = {"val_return": np.nan, "val_comp_rate": np.nan, "val_energy": np.nan, "val_interventions": np.nan, "val_arrival_rate": np.nan, "val_score": np.nan}
-        if ep % eval_freq == 0 or ep == 1:
-            val_stats = evaluate_validation(env, agent, "cppo")
-            if val_stats.get("val_score", -float("inf")) > best_val_score:
-                best_val_score = val_stats["val_score"]
-                agent.save_checkpoint(best_ckpt)
+        val_stats, best_val_score = run_periodic_validation(
+            env, agent, "cppo", ep, num_episodes, eval_freq, best_val_score, best_ckpt
+        )
 
         cum_env_steps = ep * cfg.mappo.episode_length
         env_steps_per_sec = cum_env_steps / max(1e-4, total_env_time)
